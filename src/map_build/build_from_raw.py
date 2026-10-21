@@ -14,13 +14,25 @@ def main() -> int:
     parser.add_argument("--scan", type=Path, required=True)
     parser.add_argument("--odometry", type=Path, required=True)
     parser.add_argument("--odometry-kind", choices=("auto", "log", "csv"), default="auto")
+    parser.add_argument(
+        "--m360-point-time-mode", choices=("packet-host", "device-linear"),
+        default="packet-host")
+    parser.add_argument("--lidar-start-unix", type=float)
+    parser.add_argument("--lidar-end-unix", type=float)
     parser.add_argument("--canonical-output", type=Path, required=True)
-    parser.add_argument("--camera-config", type=Path, required=True)
+    parser.add_argument("--camera-config", type=Path)
+    parser.add_argument("--camera-position-file", type=Path)
     parser.add_argument("--lidar-config", type=Path, required=True)
-    parser.add_argument("--robot-config", type=Path, required=True)
+    parser.add_argument("--robot-config", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--name", default="mapping")
     parser.add_argument("--lidar-only", action="store_true")
+    parser.add_argument("--wheelbase", type=float, help="override robot wheelbase in metres")
+    parser.add_argument("--fork-position", choices=("raised", "lowered"), default="raised")
+    parser.add_argument("--lowered-forks-offset-m", type=float, default=0.05)
+    for prefix in ("camera", "lidar"):
+        for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+            parser.add_argument(f"--{prefix}-{axis}", type=float)
     parser.add_argument("--encoder-speed-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--mapping-yaw", type=float)
@@ -44,7 +56,7 @@ def main() -> int:
     # cwd=HERE. Otherwise repository-relative paths would be resolved from the
     # internal source directory.
     for attribute in (
-        "scan", "odometry", "canonical_output", "camera_config",
+        "scan", "odometry", "canonical_output", "camera_config", "camera_position_file",
         "lidar_config", "robot_config", "output", "deploy_output", "video",
         "frame_timestamps", "labels2coords", "observations",
     ):
@@ -54,18 +66,38 @@ def main() -> int:
 
     convert = [sys.executable, str(HERE / "convert_recording.py"), "--scan", str(args.scan),
                "--odometry", str(args.odometry), "--odometry-kind", args.odometry_kind,
-               "--output", str(args.canonical_output), "--camera-config", str(args.camera_config),
-               "--lidar-config", str(args.lidar_config), "--robot-config", str(args.robot_config)]
+               "--output", str(args.canonical_output), "--lidar-config", str(args.lidar_config)]
+    for option, value in (("--camera-config", args.camera_config), ("--robot-config", args.robot_config)):
+        if value is not None:
+            convert += [option, str(value)]
+    convert += ["--m360-point-time-mode", args.m360_point_time_mode]
+    if args.lidar_start_unix is not None:
+        convert += ["--lidar-start-unix", str(args.lidar_start_unix)]
+    if args.lidar_end_unix is not None:
+        convert += ["--lidar-end-unix", str(args.lidar_end_unix)]
     subprocess.run(convert, cwd=HERE, check=True)
     command = [sys.executable, str(HERE / "build_from_canonical.py"),
                "--recording", str(args.canonical_output), "--output", str(args.output),
                "--name", args.name, "--web-resolution-m-per-px", str(args.web_resolution_m_per_px)]
+    for option, value in (("--camera-config", args.camera_config), ("--robot-config", args.robot_config),
+                          ("--camera-position-file", args.camera_position_file)):
+        if value is not None:
+            command += [option, str(value)]
+    for prefix in ("camera", "lidar"):
+        for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+            value = getattr(args, f"{prefix}_{axis}")
+            if value is not None:
+                command += [f"--{prefix}-{axis}", str(value)]
     for flag, enabled in (("--lidar-only", args.lidar_only), ("--no-web-align", args.no_web_align),
                           ("--dry-run", args.dry_run)):
         if enabled:
             command.append(flag)
     if args.encoder_speed_sign is not None:
         command += ["--encoder-speed-sign", str(args.encoder_speed_sign)]
+    if args.wheelbase is not None:
+        command += ["--wheelbase", str(args.wheelbase)]
+    command += ["--fork-position", args.fork_position,
+                "--lowered-forks-offset-m", str(args.lowered_forks_offset_m)]
     if args.steering_sign is not None:
         command += ["--steering-sign", str(args.steering_sign)]
     if args.mapping_yaw is not None:

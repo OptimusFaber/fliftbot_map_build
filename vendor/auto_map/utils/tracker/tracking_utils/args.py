@@ -8,8 +8,8 @@ def make_parser():
                         help="Camera intrinsics sidecar (camera.json)")
     parser.add_argument("--camera-position", required=True,
                         help="Camera mount sidecar: first line cm, second line roll pitch [mount_yaw] radians")
-    parser.add_argument("--labels", type=str, required=True,
-                        help="Path to labels2coords JSON/pickle (marker codes for Fourier decoder)")
+    parser.add_argument("--labels", type=str,
+                        help="Optional labels2coords JSON/pickle; omit for tracker-only marker IDs")
     parser.add_argument("--track_high_thresh", type=float, default=0.6, help="tracking confidence threshold")
     parser.add_argument("--track_low_thresh", default=0.1, type=float, help="lowest detection threshold")
     parser.add_argument("--new_track_thresh", default=0.7, type=float, help="new track thresh")

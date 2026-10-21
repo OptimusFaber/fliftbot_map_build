@@ -20,6 +20,9 @@ from PIL import Image, ImageDraw
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parents[1]
 VENDOR = PROJECT_ROOT / "vendor"
+DEFAULT_CAMERA_POSITION_M = {"x": 1.077, "y": -0.274, "z": 1.248}
+DEFAULT_CAMERA_ORIENTATION_DEG = {"roll": 0.0, "pitch": 0.0, "yaw": -90.0}
+DEFAULT_WHEELBASE_M = 1.39
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -157,7 +160,48 @@ def lidar_to_robot_trajectory(source: Path, output: Path, lidar: dict[str, Any])
     write_json(output, result)
 
 
-def camera_sidecars(camera: dict[str, Any], run_input: Path, config_path: Path) -> tuple[Path, Path]:
+def wheel_odometry_trajectory(encoder_path: Path, output: Path, robot: dict[str, Any],
+                              speed_sign: float) -> None:
+    rows = []
+    for line in encoder_path.read_text(encoding="utf-8").splitlines():
+        item = json.loads(line)
+        if item.get("enc_available", True):
+            rows.append((float(item["enc_unix"]), float(item["enc_v"]), float(item["enc_dgr"])))
+    rows = sorted(dict((row[0], row) for row in rows).values())
+    wheelbase = float(robot["wheelbase_m"])
+    steering_sign = float(robot.get("steering_sign", 1.0))
+    steering_offset = math.radians(float(robot.get("steering_offset_deg", 0.0)))
+    x = y = yaw = 0.0
+    poses = []
+    for index, (timestamp, velocity, steering_deg) in enumerate(rows):
+        if index:
+            previous = rows[index - 1]
+            dt = timestamp - previous[0]
+            if 0.0 < dt <= 0.5:
+                speed = speed_sign * 0.5 * (velocity + previous[1])
+                steering = steering_sign * math.radians(0.5 * (steering_deg + previous[2])) + steering_offset
+                angular_speed = speed * math.sin(steering) / wheelbase
+                theta = angular_speed * dt
+                forward_speed = speed * math.cos(steering)
+                if abs(angular_speed) < 1e-9:
+                    dx, dy = forward_speed * dt, 0.0
+                else:
+                    dx = forward_speed * math.sin(theta) / angular_speed
+                    dy = forward_speed * (1.0 - math.cos(theta)) / angular_speed
+                x += math.cos(yaw) * dx - math.sin(yaw) * dy
+                y += math.sin(yaw) * dx + math.cos(yaw) * dy
+                yaw += theta
+        poses.append({"timestamp_unix": timestamp, "x": x, "y": y, "z": 0.0,
+                      "qx": 0.0, "qy": 0.0, "qz": math.sin(yaw / 2.0), "qw": math.cos(yaw / 2.0)})
+    write_json(output, {"schema": "fliftbot.wheel_odometry_trajectory.v1",
+                        "tracking_frame": "rotation_axis", "origin": "first_encoder_sample",
+                        "wheelbase_m": wheelbase, "encoder_speed_sign": speed_sign,
+                        "steering_sign": steering_sign,
+                        "steering_offset_deg": float(robot.get("steering_offset_deg", 0.0)),
+                        "poses": poses})
+
+
+def camera_sidecars(camera: dict[str, Any], run_input: Path, config_base: Path) -> tuple[Path, Path]:
     position = camera["position_m"]
     angles = camera["orientation_deg"]
     camera_position = run_input / "camera_position.txt"
@@ -166,12 +210,22 @@ def camera_sidecars(camera: dict[str, Any], run_input: Path, config_path: Path) 
         f"{math.radians(angles['roll']):.12g} {math.radians(angles['pitch']):.12g} {math.radians(angles['yaw']):.12g}\n",
         encoding="utf-8",
     )
-    intrinsics = resolve(config_path.parent, camera.get("intrinsics"))
+    intrinsics = resolve(config_base, camera.get("intrinsics"))
     if intrinsics is None:
         raise ValueError("camera config has no intrinsics")
     camera_json = run_input / "camera.json"
     shutil.copy2(intrinsics, camera_json)
     return camera_position, camera_json
+
+
+def read_camera_position_file(path: Path) -> tuple[dict[str, float], dict[str, float]]:
+    lines = [line.split() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 2 or len(lines[0]) < 3 or len(lines[1]) < 2:
+        raise ValueError(f"{path}: expected XYZ in centimetres and roll/pitch[/yaw] in radians")
+    position = dict(zip(("x", "y", "z"), (float(value) / 100.0 for value in lines[0][:3])))
+    angles = dict(zip(("roll", "pitch", "yaw"),
+                      (math.degrees(float(value)) for value in lines[1][:3])))
+    return position, angles
 
 
 def make_observations(inputs: dict[str, Path | None], run_input: Path, camera_json: Path,
@@ -205,6 +259,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="optional integrated run JSON preset")
     parser.add_argument("--camera-config", type=Path, help="camera component config")
+    parser.add_argument("--camera-position-file", type=Path,
+                        help="legacy camera.txt: XYZ cm, then roll/pitch[/yaw] radians")
     parser.add_argument("--lidar-config", type=Path, help="LiDAR component config")
     parser.add_argument("--robot-config", type=Path, help="forklift component config")
     parser.add_argument("--lidar-data", type=Path, help="horizon directory (overrides config)")
@@ -215,16 +271,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--observations", type=Path, help="ready observations.json; skips video processing")
     parser.add_argument("--output", type=Path, help="result root (overrides config)")
     parser.add_argument("--name", default=None, help="name included in the result directory")
-    parser.add_argument("--yaw", type=float, help="override LiDAR yaw in degrees")
+    parser.add_argument("--lidar-x", type=float); parser.add_argument("--lidar-y", type=float); parser.add_argument("--lidar-z", type=float)
+    parser.add_argument("--yaw", "--lidar-yaw", dest="lidar_yaw", type=float, help="override LiDAR yaw in degrees")
     parser.add_argument("--mapping-yaw", type=float, help="override effective LiDAR yaw used by Cartographer")
     parser.add_argument("--max-range", type=float, help="maximum LiDAR range used by Cartographer, metres")
-    parser.add_argument("--roll", type=float, help="override LiDAR roll in degrees")
-    parser.add_argument("--pitch", type=float, help="override LiDAR pitch in degrees")
+    parser.add_argument("--roll", "--lidar-roll", dest="lidar_roll", type=float, help="override LiDAR roll in degrees")
+    parser.add_argument("--pitch", "--lidar-pitch", dest="lidar_pitch", type=float, help="override LiDAR pitch in degrees")
+    parser.add_argument("--camera-x", type=float); parser.add_argument("--camera-y", type=float); parser.add_argument("--camera-z", type=float)
+    parser.add_argument("--camera-roll", type=float); parser.add_argument("--camera-pitch", type=float); parser.add_argument("--camera-yaw", type=float)
     parser.add_argument("--wheelbase", type=float, help="override wheelbase in metres")
+    parser.add_argument(
+        "--fork-position", choices=("raised", "lowered"), default="raised",
+        help="fork position; lowered adds the configured longitudinal geometry offset (default: raised)",
+    )
+    parser.add_argument(
+        "--lowered-forks-offset-m", type=float, default=0.05,
+        help="longitudinal offset added to camera x, LiDAR x and wheelbase for lowered forks",
+    )
     parser.add_argument("--encoder-speed-sign", type=float, choices=(-1.0, 1.0), help="override encoder velocity sign")
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0), help="steering angle sign (default: robot config or +1)")
     parser.add_argument("--odometry-time-offset", type=float, default=0.0,
                         help="seconds added to encoder timestamps before Cartographer")
+    parser.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua",
+                        help="Lua configuration filename in the Cartographer config directory")
     odometry_group = parser.add_mutually_exclusive_group()
     odometry_group.add_argument(
         "--lidar-only", action="store_true",
@@ -257,21 +326,40 @@ def main() -> int:
         spec = {"schema": "fliftbot.integrated_mapping_run.v1", "configs": {}, "inputs": {}, "markers": {}}
     config_refs = spec.get("configs", {})
 
-    def select_config(cli_path: Path | None, key: str) -> Path:
+    def select_config(cli_path: Path | None, key: str, required: bool = True) -> Path | None:
         selected = cli_path.resolve() if cli_path else resolve(base, config_refs.get(key))
-        if selected is None:
+        if selected is None and required:
             raise ValueError(f"--{key if key != 'robot' else 'robot'}-config is required without a preset")
         return selected
 
-    camera_path = select_config(args.camera_config, "camera")
+    camera_path = select_config(args.camera_config, "camera", required=False)
     lidar_path = select_config(args.lidar_config, "lidar")
-    robot_path = select_config(args.robot_config, "robot")
-    camera = component(camera_path, "camera")
+    robot_path = select_config(args.robot_config, "robot", required=False)
+    camera = component(camera_path, "camera") if camera_path else {
+        "schema": "fliftbot.component_config.v1", "component": "camera", "name": "default",
+        "frame": "rotation_axis", "position_m": dict(DEFAULT_CAMERA_POSITION_M),
+        "orientation_deg": dict(DEFAULT_CAMERA_ORIENTATION_DEG),
+        "intrinsics": str((PROJECT_ROOT / "configs/camera_intrinsics.json").resolve()),
+    }
     lidar = component(lidar_path, "lidar")
-    robot = component(robot_path, "robot")
+    robot = component(robot_path, "robot") if robot_path else {
+        "schema": "fliftbot.component_config.v1", "component": "robot", "name": "default",
+        "frame": "rotation_axis", "wheelbase_m": DEFAULT_WHEELBASE_M, "steering_offset_deg": 0.0,
+    }
+    camera["position_m"] = dict(camera["position_m"])
+    camera["orientation_deg"] = dict(camera.get("orientation_deg", DEFAULT_CAMERA_ORIENTATION_DEG))
+    if args.camera_position_file:
+        sidecar_position, sidecar_angles = read_camera_position_file(args.camera_position_file.resolve())
+        if not camera_path:
+            camera["position_m"].update(sidecar_position)
+        camera["orientation_deg"].update({key: sidecar_angles[key] for key in ("roll", "pitch")})
+    for key in ("roll", "pitch", "yaw"):
+        value = getattr(args, f"camera_{key}")
+        if value is not None: camera["orientation_deg"][key] = value
     lidar["orientation_deg"] = dict(lidar["orientation_deg"])
+    lidar["position_m"] = dict(lidar["position_m"])
     for key in ("yaw", "roll", "pitch"):
-        value = getattr(args, key)
+        value = getattr(args, f"lidar_{key}")
         if value is not None:
             lidar["orientation_deg"][key] = value
     lidar["mapping_orientation_deg"] = dict(
@@ -283,6 +371,29 @@ def main() -> int:
         lidar["max_range_m"] = args.max_range
     if float(lidar.get("max_range_m", 0.0)) <= 0:
         raise ValueError("LiDAR config must define a positive max_range_m")
+    if args.lowered_forks_offset_m < 0:
+        raise ValueError("--lowered-forks-offset-m must be non-negative")
+    fork_offset_m = args.lowered_forks_offset_m if args.fork_position == "lowered" else 0.0
+    base_geometry = {
+        "camera_x_m": float(camera["position_m"]["x"]),
+        "lidar_x_m": float(lidar["position_m"]["x"]),
+        "wheelbase_m": float(robot["wheelbase_m"]),
+    }
+    if fork_offset_m:
+        camera["position_m"] = dict(camera["position_m"])
+        lidar["position_m"] = dict(lidar["position_m"])
+        camera["position_m"]["x"] = base_geometry["camera_x_m"] + fork_offset_m
+        lidar["position_m"]["x"] = base_geometry["lidar_x_m"] + fork_offset_m
+        robot["wheelbase_m"] = base_geometry["wheelbase_m"] + fork_offset_m
+    # Explicit CLI geometry is always the final authority, including when a
+    # fork-state correction was requested.
+    for key in ("x", "y", "z"):
+        camera_value = getattr(args, f"camera_{key}")
+        lidar_value = getattr(args, f"lidar_{key}")
+        if camera_value is not None:
+            camera["position_m"][key] = camera_value
+        if lidar_value is not None:
+            lidar["position_m"][key] = lidar_value
     if args.wheelbase is not None:
         robot["wheelbase_m"] = args.wheelbase
     if args.encoder_speed_sign is not None:
@@ -325,7 +436,8 @@ def main() -> int:
     marker_lidar_runtime = dict(lidar_runtime)
     marker_lidar_runtime["orientation_deg"] = lidar["orientation_deg"]
     write_json(run_input / "lidar.markers.config", marker_lidar_runtime)
-    camera_position, camera_json = camera_sidecars(camera, run_input, camera_path)
+    camera_position, camera_json = camera_sidecars(
+        camera, run_input, camera_path.parent if camera_path else PROJECT_ROOT)
     markers = dict(spec.get("markers", {}))
     if args.with_markers:
         markers["enabled"] = True
@@ -338,7 +450,17 @@ def main() -> int:
         "source_config": str(config_path) if config_path else None, "camera": camera, "lidar": lidar, "robot": robot,
         "inputs": {key: str(value) if value else None for key, value in inputs.items()},
         "input_staging": staging, "output": str(out), "markers": markers,
-        "mapping": {"use_odometry": not args.lidar_only},
+        "mapping": {"use_odometry": not args.lidar_only, "cartographer_config": args.cartographer_config},
+        "fork_geometry": {
+            "position": args.fork_position,
+            "lowered_offset_m": fork_offset_m,
+            "base": base_geometry,
+            "effective": {
+                "camera_x_m": float(camera["position_m"]["x"]),
+                "lidar_x_m": float(lidar["position_m"]["x"]),
+                "wheelbase_m": float(robot["wheelbase_m"]),
+            },
+        },
         "odometry_time_offset_s": args.odometry_time_offset,
     }
     write_json(out / "run_parameters.json", resolved)
@@ -352,7 +474,7 @@ def main() -> int:
     mapping_command = [
         str(runner), "--run_dir", str(run_input), "--output", str(map_dir),
         "--configuration_dir", str(VENDOR / "fliftbot_mapping/config/cartographer"),
-        "--configuration_file", "fliftbot_2d_offline.lua",
+        "--configuration_file", args.cartographer_config,
         "--wheelbase", str(robot["wheelbase_m"]), "--steering_offset_deg", str(robot.get("steering_offset_deg", 0.0)),
         "--steering_sign", str(robot.get("steering_sign", 1.0)),
         "--encoder_speed_sign", str(lidar_runtime["encoder_speed_sign"]),
@@ -365,6 +487,8 @@ def main() -> int:
     shutil.copy2(map_dir / "map.png", out / "map.png")
     robot_trajectory = out / "trajectory_robot_axis.json"
     lidar_to_robot_trajectory(map_dir / "trajectory.json", robot_trajectory, lidar)
+    wheel_odometry_trajectory(run_input / "encoder.jsonl", out / "trajectory_wheel_odometry.json",
+                              robot, float(lidar_runtime["encoder_speed_sign"]))
     render_trajectory(map_dir, out / "map_with_lidar_trajectory.png")
     render_trajectory(map_dir, out / "map_with_trajectory.png", robot_trajectory)
     shutil.copy2(out / "map_with_trajectory.png", map_dir / "track.png")
@@ -376,10 +500,17 @@ def main() -> int:
             sys.executable, str(VENDOR / "fliftbot_mapping/scripts/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
             "--observations", str(observations), "--trajectory", str(map_dir / "trajectory.json"),
             "--map-dir", str(map_dir), "--camera-position", str(camera_position),
+            "--camera-json", str(camera_json),
             "--lidar-config", str(run_input / "lidar.markers.config"), "--out-dir", str(marker_dir),
         ]
         if markers.get("ceiling_z_m") is not None:
             command += ["--ceiling-z", str(markers["ceiling_z_m"])]
+        write_json(marker_dir / "run_parameters.json", {
+            "schema": "fliftbot.marker_run_parameters.v1",
+            "camera": camera, "lidar": marker_lidar_runtime,
+            "inputs": {"observations": str(observations), "trajectory": str(map_dir / "trajectory.json")},
+            "parameters": markers, "command": command,
+        })
         subprocess.run(command, check=True)
         shutil.copy2(marker_dir / "stored_ray_corrected_map.png", out / "map_with_markers.png")
 

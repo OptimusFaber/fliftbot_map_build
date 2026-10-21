@@ -163,15 +163,20 @@ def split_segments(rows: list[dict[str, Any]], max_frame_gap: int = 3, max_time_
     return result
 
 
-def estimate_track_height(origins: np.ndarray, directions: np.ndarray, indices: np.ndarray) -> dict[str, Any] | None:
+def estimate_track_height(origins: np.ndarray, directions: np.ndarray, indices: np.ndarray,
+                          weights: np.ndarray | None = None) -> dict[str, Any] | None:
     o, d = origins[indices], directions[indices]
     q = d[:, :2] / d[:, 2, None]
     a = o[:, :2] - o[:, 2, None] * q
-    da, dq = a - a.mean(axis=0), q - q.mean(axis=0)
-    denominator = float(np.sum(dq * dq))
+    weights = np.ones(len(indices), dtype=float) if weights is None else np.clip(np.asarray(weights, dtype=float), 1.0e-3, None)
+    total = float(np.sum(weights))
+    a_mean = np.sum(a * weights[:, None], axis=0) / total
+    q_mean = np.sum(q * weights[:, None], axis=0) / total
+    da, dq = a - a_mean, q - q_mean
+    denominator = float(np.sum(weights[:, None] * dq * dq))
     if denominator < 1.0e-4:
         return None
-    height = -float(np.sum(da * dq)) / denominator
+    height = -float(np.sum(weights[:, None] * da * dq)) / denominator
     points = a + height * q
     center = np.median(points, axis=0)
     residuals = np.linalg.norm(points - center, axis=1)
@@ -225,6 +230,13 @@ def render(path: Path, map_dir: Path, trajectory: np.ndarray, origins: np.ndarra
     if markers:
         points = np.asarray([row["point_xyz_m"][:2] for row in markers])
         ax.scatter(points[:, 0], points[:, 1], color="#dc2626", edgecolors="white", lw=0.4, s=38, label="track-first markers")
+        for index, row in enumerate(markers, 1):
+            x, y, z = row["point_xyz_m"]
+            marker_id = row.get("marker_id", f"marker_{index:03d}").replace("marker_", "")
+            ax.annotate(f"{marker_id} · {z:.2f} m", (x, y), xytext=(4, 4),
+                        textcoords="offset points", fontsize=5.5, color="#991b1b",
+                        bbox={"boxstyle":"round,pad=0.15", "facecolor":"white",
+                              "edgecolor":"none", "alpha":0.72})
     ax.set_aspect("equal"); ax.grid(alpha=0.15); ax.legend(loc="best")
     ax.set_title(f"Track-first production candidate — {status} — ceiling={ceiling_z}")
     fig.tight_layout(); fig.savefig(path)

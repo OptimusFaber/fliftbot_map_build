@@ -9,6 +9,7 @@ import math
 import shutil
 import sys
 import hashlib
+import warnings
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -97,6 +98,21 @@ def load_encoder_csv(path: Path) -> tuple[list[dict], int, int]:
     return unique, len(rows), duplicates
 
 
+def detect_odometry_kind(path: Path) -> str:
+    """Detect the supported odometry dialect from its CSV header."""
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.reader(stream)
+        header = {value.strip() for value in next(reader, [])}
+    if {"enc_t", "enc_v", "enc_dgr"} <= header:
+        return "log"
+    if {"timestamp_sec", "linear_velocity_m_per_s", "wheel_angle_rad"} <= header:
+        return "csv"
+    raise ValueError(
+        f"{path}: cannot detect odometry format from content; expected move logger "
+        "enc_t/enc_v/enc_dgr or encoder timestamp_sec/linear_velocity_m_per_s/wheel_angle_rad"
+    )
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -118,17 +134,44 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--odometry-kind", choices=("auto", "log", "csv"), default="auto")
     parser.add_argument("--camera-config", type=Path)
-    parser.add_argument("--lidar-config", type=Path)
+    parser.add_argument("--lidar-config", type=Path, required=True)
     parser.add_argument("--robot-config", type=Path)
+    parser.add_argument(
+        "--m360-point-time-mode", choices=("packet-host", "device-linear"),
+        default="packet-host",
+        help="experimental device-linear uses M360 TimeStamp + x/(HZ*2300)",
+    )
+    parser.add_argument("--lidar-start-unix", type=float)
+    parser.add_argument("--lidar-end-unix", type=float)
     args = parser.parse_args()
+    detected_kind = detect_odometry_kind(args.odometry.resolve())
+    extension_kind = {".log": "log", ".csv": "csv"}.get(args.odometry.suffix.lower())
+    if extension_kind and extension_kind != detected_kind:
+        warnings.warn(
+            f"odometry extension suggests {extension_kind}, but content is {detected_kind}; "
+            f"using {detected_kind if args.odometry_kind == 'auto' else args.odometry_kind}",
+            stacklevel=1,
+        )
     if args.odometry_kind == "auto":
-        kind = "log" if args.odometry.suffix.lower() == ".log" else "csv"
+        kind = detected_kind
     else:
         kind = args.odometry_kind
+        if kind != detected_kind:
+            warnings.warn(
+                f"--odometry-kind={kind} does not match detected {detected_kind} content; "
+                "the explicit type has priority and conversion may fail",
+                stacklevel=1,
+            )
     out = args.output.resolve()
     horizon = out / "horizon"
     out.mkdir(parents=True, exist_ok=True)
-    lidar_report = write_horizon(args.scan.resolve(), horizon)
+    if args.lidar_start_unix is not None and args.lidar_end_unix is not None:
+        if args.lidar_start_unix >= args.lidar_end_unix:
+            parser.error("--lidar-start-unix must be less than --lidar-end-unix")
+    lidar_report = write_horizon(
+        args.scan.resolve(), horizon,
+        point_time_mode=args.m360_point_time_mode,
+        start_unix=args.lidar_start_unix, end_unix=args.lidar_end_unix)
     if not lidar_report["first_ts"] or not lidar_report["last_ts"]:
         raise RuntimeError("LiDAR conversion produced no scans")
     if kind == "log":
@@ -136,12 +179,19 @@ def main() -> int:
         rows, sync = nearest_slice(all_rows, lidar_report["first_ts"], lidar_report["last_ts"])
         encoder_stats = {"source_samples": len(all_rows), "duplicates_removed": 0}
     else:
-        rows, source_samples, duplicates = load_encoder_csv(args.odometry.resolve())
-        if not rows:
+        all_rows, source_samples, duplicates = load_encoder_csv(args.odometry.resolve())
+        if not all_rows:
             raise ValueError("encoder CSV contains no valid rows")
-        sync = {"mode": "full_csv", "lidar_start_unix": lidar_report["first_ts"],
-                "lidar_end_unix": lidar_report["last_ts"],
-                "encoder_start_unix": rows[0]["enc_unix"], "encoder_end_unix": rows[-1]["enc_unix"]}
+        if args.lidar_start_unix is not None or args.lidar_end_unix is not None:
+            rows, sync = nearest_slice(
+                all_rows, lidar_report["first_ts"], lidar_report["last_ts"])
+            sync["mode"] = "interval_csv"
+        else:
+            rows = all_rows
+            sync = {"mode": "full_csv", "lidar_start_unix": lidar_report["first_ts"],
+                    "lidar_end_unix": lidar_report["last_ts"],
+                    "encoder_start_unix": rows[0]["enc_unix"],
+                    "encoder_end_unix": rows[-1]["enc_unix"]}
         encoder_stats = {"source_samples": source_samples, "duplicates_removed": duplicates}
     write_jsonl(out / "encoder.jsonl", rows)
     copied_configs = {}
@@ -171,6 +221,7 @@ def main() -> int:
                                                "sha256": sha256(intrinsics_source)}
     metadata = {"schema": "fliftbot.canonical_recording.v1", "lidar_source": str(args.scan.resolve()),
                 "odometry_source": str(args.odometry.resolve()), "odometry_kind": kind,
+                "odometry_detected_kind": detected_kind,
                 "sources": {"lidar_sha256": sha256(args.scan.resolve()),
                             "odometry_sha256": sha256(args.odometry.resolve())},
                 "lidar": lidar_report, "encoder_samples": len(rows), "encoder": encoder_stats,

@@ -79,9 +79,7 @@ source /opt/ros/humble/setup.bash
 python src/map_build/build_from_raw.py \
   --scan ../examples/scan.m360 \
   --odometry ../examples/fliftbot_move_logger_2026-10-07_10-10-04_Oct-07.log \
-  --camera-config configs/current_version/camera.config \
   --lidar-config configs/current_version/lidar.config \
-  --robot-config configs/current_version/liftbot.config \
   --canonical-output ../ros-data/recordings/my_run/canonical \
   --output ../ros-data/results --name my_run
 ```
@@ -97,9 +95,27 @@ python src/map_build/build_from_canonical.py \
   --output ../ros-data/results --name my_run
 ```
 
-Основные параметры: `--encoder-speed-sign -1|1`, `--steering-sign -1|1`,
-`--mapping-yaw DEG`, `--odometry-time-offset SEC`, `--lidar-only`,
+Конфиг LiDAR обязателен. Без конфигов камеры и робота используются
+`camera=(1.077, -0.274, 1.248) м`, `wheelbase=1.39 м`, поднятые вилы и
+intrinsics из `configs/camera_intrinsics.json`. Основные параметры:
+`--camera-x/y/z`, `--camera-roll/pitch/yaw`, `--lidar-x/y/z`,
+`--lidar-roll/pitch/yaw`, `--wheelbase`, `--encoder-speed-sign -1|1`,
+`--steering-sign -1|1`, `--mapping-yaw DEG`, `--odometry-time-offset SEC`, `--lidar-only`,
 `--deploy-output DIR` и `--dry-run`.
+
+Явные CLI-параметры всегда имеют приоритет над component config. Legacy-файл
+`camera.txt` подключается через `--camera-position-file`: при наличии
+`camera.config` координаты берутся из config, а roll/pitch — из `camera.txt`;
+после этого индивидуальные `--camera-*` могут переопределить любое значение.
+
+Отдельный повторный расчёт меток для готового запуска автоматически использует
+конфиги и траекторию этого запуска; любой путь можно заменить явным аргументом:
+
+```bash
+python src/map_build/process_markers.py --run-dir ../ros-data/results/<run_id>
+```
+
+В каталоге `markers/` сохраняется собственный `run_parameters.json`.
 
 Для текущего M360-тракта проверен контракт `mapping_yaw=180`,
 `steering_sign=+1`; для move logger `.log` обычно нужен
@@ -127,6 +143,12 @@ python src/map_build/edit_web_map.py \
 ```
 
 Подробное описание форматов и контрактов находится в `PIPELINE_TASKS.md`.
+
+Положение вил задаётся параметром `--fork-position raised|lowered`. По
+умолчанию используются поднятые вилы (`raised`). Для опущенных вил (`lowered`)
+пайплайн добавляет 0.05 м к продольной координате камеры, продольной координате
+лидара и wheelbase. Величину поправки можно переопределить параметром
+`--lowered-forks-offset-m`.
 
 `scripts/run_camera_calibration_experiments.sh` воспроизводит отдельную серию
 калибровочных экспериментов. Перед запуском ему нужно передать пути через

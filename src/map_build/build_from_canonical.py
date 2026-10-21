@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 import numpy as np
 
@@ -19,14 +20,16 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=HERE, check=True)
 
 
-def canonical_config(recording: Path, supplied: Path | None, name: str) -> Path:
+def canonical_config(recording: Path, supplied: Path | None, name: str, required: bool = True) -> Path | None:
     selected = supplied.resolve() if supplied else recording / name
     if not selected.is_file():
-        raise FileNotFoundError(f"configuration is required and was not found: {selected}")
+        if required:
+            raise FileNotFoundError(f"configuration is required and was not found: {selected}")
+        return None
     return selected
 
 
-def default_encoder_speed_sign(recording: Path) -> float:
+def default_encoder_speed_sign(recording: Path, lidar_config: Path) -> float:
     for name in ("conversion_report.json", "recording_metadata.json"):
         path = recording / name
         if path.is_file():
@@ -35,7 +38,20 @@ def default_encoder_speed_sign(recording: Path) -> float:
                 return -1.0
             if kind == "csv":
                 return 1.0
-    raise ValueError("cannot infer encoder sign: pass --encoder-speed-sign explicitly")
+    document = json.loads(lidar_config.read_text(encoding="utf-8"))
+    if document.get("encoder_speed_sign") in (-1, -1.0, 1, 1.0):
+        return float(document["encoder_speed_sign"])
+    raise ValueError(
+        "cannot infer encoder sign from recording metadata or lidar config; "
+        "pass --encoder-speed-sign explicitly")
+
+
+def odometry_kind(recording: Path) -> str | None:
+    for name in ("conversion_report.json", "recording_metadata.json"):
+        path = recording / name
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8")).get("odometry_kind")
+    return None
 
 
 def sha256(path: Path) -> str:
@@ -85,20 +101,40 @@ def export_marker_coordinates(run_dir: Path) -> None:
         shutil.copy2(rendered, marker_dir / "markers_map.png")
 
 
+def append_geometry_options(command: list[str], args: argparse.Namespace,
+                            camera: Path | None, robot: Path | None) -> None:
+    for option, value in (("--camera-config", camera), ("--robot-config", robot),
+                          ("--camera-position-file", args.camera_position_file)):
+        if value is not None:
+            command += [option, str(value)]
+    for prefix in ("camera", "lidar"):
+        for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+            value = getattr(args, f"{prefix}_{axis}")
+            if value is not None:
+                command += [f"--{prefix}-{axis}", str(value)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--recording", type=Path, required=True)
     parser.add_argument("--camera-config", type=Path)
+    parser.add_argument("--camera-position-file", type=Path)
     parser.add_argument("--lidar-config", type=Path)
     parser.add_argument("--robot-config", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--name", default="mapping")
     parser.add_argument("--lidar-only", action="store_true")
     parser.add_argument("--wheelbase", type=float, help="override robot wheelbase in metres")
+    parser.add_argument("--fork-position", choices=("raised", "lowered"), default="raised")
+    parser.add_argument("--lowered-forks-offset-m", type=float, default=0.05)
+    for prefix in ("camera", "lidar"):
+        for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+            parser.add_argument(f"--{prefix}-{axis}", type=float)
     parser.add_argument("--encoder-speed-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--mapping-yaw", type=float)
     parser.add_argument("--odometry-time-offset", type=float, default=0.0)
+    parser.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua")
     parser.add_argument("--web-resolution-m-per-px", type=float, default=0.01)
     parser.add_argument("--no-web-align", action="store_true")
     parser.add_argument("--origin-map-xy", type=float, nargs=2, metavar=("X", "Y"))
@@ -124,50 +160,62 @@ def main() -> int:
             setattr(args, attribute, value.resolve())
 
     recording = args.recording.resolve()
-    camera = canonical_config(recording, args.camera_config, "camera.config")
+    camera = canonical_config(recording, args.camera_config, "camera.config", required=False)
     lidar = canonical_config(recording, args.lidar_config, "lidar.config")
-    robot = canonical_config(recording, args.robot_config, "liftbot.config")
+    robot = canonical_config(recording, args.robot_config, "liftbot.config", required=False)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     validation = output / f"{args.name}_recording_validation.json"
     encoder_speed_sign = (args.encoder_speed_sign if args.encoder_speed_sign is not None
-                          else default_encoder_speed_sign(recording))
+                          else default_encoder_speed_sign(recording, lidar))
+    kind = odometry_kind(recording)
+    expected_sign = {"log": -1.0, "csv": 1.0}.get(kind)
+    if args.encoder_speed_sign is not None and expected_sign is not None and args.encoder_speed_sign != expected_sign:
+        warnings.warn(
+            f"--encoder-speed-sign={args.encoder_speed_sign:g} is unusual for odometry kind {kind}; "
+            f"the usual value is {expected_sign:g}. The explicit value has priority.", stacklevel=1)
     run([sys.executable, str(HERE / "validate_recording.py"), str(recording), "--json", str(validation)])
 
     if args.dry_run:
         command = [sys.executable, str(HERE / "build_map.py"), "--recording", str(recording),
-                   "--camera-config", str(camera), "--lidar-config", str(lidar),
-                   "--robot-config", str(robot), "--output", str(output), "--name", args.name,
+                   "--lidar-config", str(lidar), "--output", str(output), "--name", args.name,
                    "--dry-run"]
+        append_geometry_options(command, args, camera, robot)
         if args.lidar_only:
             command.append("--lidar-only")
         if args.wheelbase is not None:
             command += ["--wheelbase", str(args.wheelbase)]
+        command += ["--fork-position", args.fork_position,
+                    "--lowered-forks-offset-m", str(args.lowered_forks_offset_m)]
         command += ["--encoder-speed-sign", str(encoder_speed_sign)]
         if args.steering_sign is not None:
             command += ["--steering-sign", str(args.steering_sign)]
         if args.mapping_yaw is not None:
             command += ["--mapping-yaw", str(args.mapping_yaw)]
         command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+        command += ["--cartographer-config", args.cartographer_config]
         run(command)
         print(output)
         return 0
 
     with tempfile.NamedTemporaryFile(prefix="map-build-result-", suffix=".txt") as marker:
         command = [sys.executable, str(HERE / "build_map.py"), "--recording", str(recording),
-                   "--camera-config", str(camera), "--lidar-config", str(lidar),
-                   "--robot-config", str(robot), "--output", str(output), "--name", args.name,
+                   "--lidar-config", str(lidar), "--output", str(output), "--name", args.name,
                    "--result-path-file", marker.name]
+        append_geometry_options(command, args, camera, robot)
         if args.lidar_only:
             command.append("--lidar-only")
         if args.wheelbase is not None:
             command += ["--wheelbase", str(args.wheelbase)]
+        command += ["--fork-position", args.fork_position,
+                    "--lowered-forks-offset-m", str(args.lowered_forks_offset_m)]
         command += ["--encoder-speed-sign", str(encoder_speed_sign)]
         if args.steering_sign is not None:
             command += ["--steering-sign", str(args.steering_sign)]
         if args.mapping_yaw is not None:
             command += ["--mapping-yaw", str(args.mapping_yaw)]
         command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+        command += ["--cartographer-config", args.cartographer_config]
         marker_inputs = (("--video", args.video), ("--frame-timestamps", args.frame_timestamps),
                          ("--labels2coords", args.labels2coords), ("--observations", args.observations),
                          ("--ceiling-z", args.ceiling_z))

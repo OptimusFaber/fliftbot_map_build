@@ -49,6 +49,13 @@ def _to_python_list(values, cast_type):
 
 
 class VideoProcessor:
+    # Keep the same geometric detection gate as the detector-only exporter.
+    # A clipped box has a biased center and therefore produces a bad camera
+    # ray even when BoT-SORT manages to associate it with the correct track.
+    MIN_ASPECT_RATIO = 0.72
+    EDGE_EPSILON_PX = 1.0
+    ROBUST_SIZE_SIGMA = 3.0
+
     def __init__(self, video_path, model_path, bs_args, labels):
         self.args = bs_args
         self.input_path = Path(video_path)
@@ -57,13 +64,10 @@ class VideoProcessor:
         self.cap = cv2.VideoCapture(str(self.video_path))
         self.detector = YOLO(model=model_path, task="detect")
         self.tracker = BoTSORT(self.args)
-        if not labels:
-            raise ValueError(
-                "Missing --labels. Pass labels2coords JSON or pickle, e.g. "
-                "ros-data/gt/real_room/real_room/labels2coords.json"
-            )
         self.labels = labels
-        self.fourier_decoder = FourierDecoder.from_labels2coords(self.labels, top_n=-1)
+        self.fourier_decoder = (
+            FourierDecoder.from_labels2coords(self.labels, top_n=-1) if self.labels else None
+        )
         self.image = None
         self.current_coordinates = None
         self.current_frame_timestamp: float | None = None
@@ -231,12 +235,60 @@ class VideoProcessor:
         dets = self.detector(self.image, verbose=False)[0].boxes.data.cpu().numpy()
         # print(dets)
         # raise Exception("Stop")
+        # Feed every detector box to BoT-SORT so a temporarily clipped marker
+        # does not break its persistent track ID.  Only observations exported
+        # for decoding/ray construction are filtered below.
         tracks = self.tracker.update(dets, self.image)
+        tracks = self._filter_track_observations(tracks, self.image.shape)
         # print(tracks)
         self.process_ceil_labels_fourier(tracks, self.image, (None, None) if self.current_coordinates is None else self.current_coordinates)
         self.current_frame_camera_meta = self._compute_frame_camera_meta(tracks)
         self.frame_index += 1
         return True, tracks, self.current_frame_timestamp
+
+    @classmethod
+    def _filter_track_observations(cls, tracks: list[STrack], image_shape) -> list[STrack]:
+        """Reject unreliable observations without interrupting the tracker.
+
+        This intentionally mirrors ``get_video_data_detections.py``.  The
+        full detection stream has already updated BoT-SORT; this method only
+        controls which current boxes may produce decoded data and camera rays.
+        """
+        if not tracks:
+            return []
+
+        height, width = image_shape[:2]
+        records = []
+        for track in tracks:
+            x1, y1, x2, y2 = map(float, track.tlbr)
+            box_width = max(0.0, x2 - x1)
+            box_height = max(0.0, y2 - y1)
+            area = box_width * box_height
+            longest_side = max(box_width, box_height)
+            aspect = min(box_width, box_height) / longest_side if longest_side > 0 else 0.0
+            clipped = (
+                x1 <= cls.EDGE_EPSILON_PX
+                or y1 <= cls.EDGE_EPSILON_PX
+                or x2 >= width - cls.EDGE_EPSILON_PX
+                or y2 >= height - cls.EDGE_EPSILON_PX
+            )
+            records.append((track, area, aspect, clipped))
+
+        positive = np.asarray([area for _, area, _, _ in records if area > 0], dtype=float)
+        if len(positive) >= 3:
+            log_area = np.log(positive)
+            center = float(np.median(log_area))
+            mad = float(np.median(np.abs(log_area - center)))
+            robust_sigma = max(1.4826 * mad, 0.05)
+            min_area = float(np.exp(center - cls.ROBUST_SIZE_SIGMA * robust_sigma))
+        else:
+            min_area = 0.0
+
+        return [
+            track
+            for track, area, aspect, clipped in records
+            if not clipped and aspect >= cls.MIN_ASPECT_RATIO and area >= min_area
+        ]
 
     def _compute_frame_camera_meta(self, tracks: list[STrack]) -> dict | None:
         """Return per-track center/ray metadata keyed by track_id."""
@@ -284,6 +336,12 @@ class VideoProcessor:
         if not tracks:
             return
         dets = [track.dets for track in tracks]
+        if self.fourier_decoder is None:
+            for det, track in zip(dets, tracks):
+                center = (int((det[0] + det[2]) // 2), int((det[1] + det[3]) // 2))
+                track.update_code_and_center([-1], [1.0], center)
+            self.prev_codes = []
+            return
         crops = [im[int(det[1]):int(det[3]), int(det[0]):int(det[2])] for det in dets]
 
         # Build allowed codes per image if adjacency available and previous codes exist

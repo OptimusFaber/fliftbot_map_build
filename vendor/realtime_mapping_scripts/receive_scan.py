@@ -48,7 +48,10 @@ class Packet:
 
     @property
     def timestamp(self) -> float:
-        return self.timestamp_seconds + self.timestamp_fraction / 2**32
+        # TimeStamp is an unsigned 64-bit fixed-point value transmitted
+        # little-endian.  The first uint32 in the byte stream is therefore
+        # the low (fractional) word and the second is the high (seconds) word.
+        return self.timestamp_fraction + self.timestamp_seconds / 2**32
 
 
 def decode_packet(data: bytes, host_time: float = 0.0) -> Packet:

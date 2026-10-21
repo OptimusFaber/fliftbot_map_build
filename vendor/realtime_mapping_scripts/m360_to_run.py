@@ -20,12 +20,69 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receive_scan import (  # noqa: E402
+    HEADER,
     INVALID_DISTANCE,
     POINTS_PER_PACKET,
     POINTS_PER_SCAN,
     decode_packet,
     iter_raw_records,
 )
+
+POINT_TIME_MODES = ("packet-host", "device-linear")
+
+
+def _device_to_host_clock(m360_path: Path, start_unix: float | None,
+                          end_unix: float | None) -> tuple[float, float, dict]:
+    """Fit host packet-receive time to the M360 device clock.
+
+    The manual defines TimeStamp as the first firing in a packet.  A UDP
+    datagram can only be received after all 115 firings, so the fit pairs host
+    receive time with the nominal device time immediately after the packet.
+    Two robust least-squares passes reject scheduler/network-delay outliers.
+    """
+    device_end, host_receive = [], []
+    margin = 1.0
+    with m360_path.open("rb") as handle:
+        handle.seek(0)
+    for host_t, raw in iter_raw_records(str(m360_path)):
+        if start_unix is not None and host_t < start_unix - margin:
+            continue
+        if end_unix is not None and host_t > end_unix + margin:
+            break
+        _version, _revolution, frequency_hz, _encoder, low, high = HEADER.unpack_from(raw)
+        if frequency_hz <= 0:
+            continue
+        first = high + low / 2**32
+        device_end.append(first + POINTS_PER_PACKET / (POINTS_PER_SCAN * frequency_hz))
+        host_receive.append(host_t)
+    if len(device_end) < 20:
+        raise ValueError("not enough M360 packets to fit device clock to host clock")
+    x = np.asarray(device_end, dtype=np.float64)
+    y = np.asarray(host_receive, dtype=np.float64)
+    x0, y0 = float(np.median(x)), float(np.median(y))
+    keep = np.ones(len(x), dtype=bool)
+    slope, intercept_centered = 1.0, 0.0
+    for _ in range(2):
+        slope, intercept_centered = np.polyfit(x[keep] - x0, y[keep] - y0, 1)
+        residual = (y - y0) - (slope * (x - x0) + intercept_centered)
+        median = float(np.median(residual[keep]))
+        mad = float(np.median(np.abs(residual[keep] - median)))
+        threshold = max(0.001, 6.0 * 1.4826 * mad)
+        keep = np.abs(residual - median) <= threshold
+    intercept = y0 + intercept_centered - slope * x0
+    residual = y - (slope * x + intercept)
+    report = {
+        "mode": "device-linear",
+        "manual_contract": "TimeStamp is first point; dt=1/(HZ*2300)",
+        "clock_model": "host_receive = slope * device_packet_end + intercept",
+        "slope": float(slope),
+        "drift_ppm": float((slope - 1.0) * 1e6),
+        "intercept_s": float(intercept),
+        "samples": int(len(x)),
+        "inliers": int(keep.sum()),
+        "residual_abs_p95_ms": float(np.percentile(np.abs(residual[keep]), 95) * 1e3),
+    }
+    return float(slope), float(intercept), report
 
 
 def stamp_name(unix_t: float) -> str:
@@ -128,13 +185,15 @@ def _encoder_stats(samples: list[dict]) -> dict:
 
 
 def save_scan(
-    horizon_dir: Path, frame_index: int, scan, min_points: int = 200
+    horizon_dir: Path, frame_index: int, scan, min_points: int = 200,
+    point_time_mode: str = "packet-host", clock_model: tuple[float, float] | None = None,
+    start_unix: float | None = None, end_unix: float | None = None,
 ) -> float | None:
     xs, ys, inten, times = [], [], [], []
     for index, measurement in enumerate(scan):
         if measurement is None:
             continue
-        distance_mm, intensity, _device_t, host_t = measurement
+        distance_mm, intensity, device_t, host_t, frequency_hz, packet_point = measurement
         if distance_mm == INVALID_DISTANCE:
             continue
         distance_m = distance_mm / 1000.0
@@ -142,13 +201,23 @@ def save_scan(
         xs.append(distance_m * math.cos(angle))
         ys.append(distance_m * math.sin(angle))
         inten.append(intensity)
-        times.append(host_t)
+        if point_time_mode == "device-linear":
+            if clock_model is None or frequency_hz <= 0:
+                raise ValueError("device-linear timing needs a valid clock model and HZ")
+            slope, intercept = clock_model
+            device_point_t = device_t + packet_point / (POINTS_PER_SCAN * frequency_hz)
+            times.append(slope * device_point_t + intercept)
+        else:
+            times.append(host_t)
     if len(xs) < min_points:
         return None
     xy = np.column_stack((np.asarray(xs, np.float32), np.asarray(ys, np.float32)))
     xyz = np.column_stack((xy, np.zeros(len(xs), np.float32)))
     times_a = np.asarray(times, np.float64)
     stamp = float(np.median(times_a))
+    if ((start_unix is not None and stamp < start_unix) or
+            (end_unix is not None and stamp > end_unix)):
+        return None
     path = horizon_dir / f"{frame_index:05d}_{stamp_name(stamp)}.npz"
     np.savez(
         path,
@@ -164,7 +233,9 @@ def save_scan(
 
 
 def write_horizon(
-    m360_path: Path, horizon_dir: Path, min_points: int = 200
+    m360_path: Path, horizon_dir: Path, min_points: int = 200,
+    point_time_mode: str = "packet-host", start_unix: float | None = None,
+    end_unix: float | None = None,
 ) -> dict:
     """Convert raw M360 packets into one canonical NPZ per revolution.
 
@@ -173,7 +244,15 @@ def write_horizon(
     host receive timestamp stored by ``receive_scan.py`` is the Unix timeline
     shared with the wheel encoder and is therefore used for NPZ ``t``/``stamp``.
     """
+    if point_time_mode not in POINT_TIME_MODES:
+        raise ValueError(f"point_time_mode must be one of {POINT_TIME_MODES}")
     horizon_dir.mkdir(parents=True, exist_ok=True)
+    clock_model = None
+    timing_report = {"mode": point_time_mode}
+    if point_time_mode == "device-linear":
+        slope, intercept, timing_report = _device_to_host_clock(
+            m360_path, start_unix, end_unix)
+        clock_model = (slope, intercept)
     current_rev = None
     scan = [None] * POINTS_PER_SCAN
     frame_index = 0
@@ -186,7 +265,10 @@ def write_horizon(
     def flush():
         nonlocal frame_index, saved, skipped
         frame_index += 1
-        stamp = save_scan(horizon_dir, frame_index, scan, min_points=min_points)
+        stamp = save_scan(
+            horizon_dir, frame_index, scan, min_points=min_points,
+            point_time_mode=point_time_mode, clock_model=clock_model,
+            start_unix=start_unix, end_unix=end_unix)
         if stamp is None:
             skipped += 1
         else:
@@ -194,6 +276,10 @@ def write_horizon(
             stamps.append(stamp)
 
     for host_t, raw in iter_raw_records(str(m360_path)):
+        if start_unix is not None and host_t < start_unix - 0.1:
+            continue
+        if end_unix is not None and host_t > end_unix + 0.1:
+            break
         packet = decode_packet(raw, host_t)
         packets += 1
         if current_rev is None:
@@ -209,12 +295,14 @@ def write_horizon(
         end = min(start + POINTS_PER_PACKET, POINTS_PER_SCAN)
         if start < POINTS_PER_SCAN:
             scan[start:end] = [
-                (distance, intensity, packet.timestamp, packet.host_time)
-                for distance, intensity in packet.points[: end - start]
+                (distance, intensity, packet.timestamp, packet.host_time,
+                 packet.frequency_hz, point_index)
+                for point_index, (distance, intensity)
+                in enumerate(packet.points[: end - start])
             ]
     if current_rev is not None:
         flush()
-    return {
+    report = {
         "packets": packets,
         "invalid_packets": invalid_packets,
         "frames": saved,
@@ -223,7 +311,9 @@ def write_horizon(
         "first_ts": stamps[0] if stamps else None,
         "last_ts": stamps[-1] if stamps else None,
         "clock": "jetson_host_time",
+        "point_timing": timing_report,
     }
+    return report
 
 
 def main() -> None:
