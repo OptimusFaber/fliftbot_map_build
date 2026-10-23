@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-sys.path.insert(0, str(ROOT / "vendor" / "realtime_mapping_scripts"))
+sys.path.insert(0, str(ROOT / "src" / "realtime_mapping_scripts"))
 from m360_to_run import write_horizon  # type: ignore  # noqa: E402
 
 LOCAL_TZ = ZoneInfo("Europe/Moscow")

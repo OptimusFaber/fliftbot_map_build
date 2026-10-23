@@ -1,7 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
-vendor/fliftbot_mapping/standalone_cartographer/build/
-vendor/auto_map/utils/tmp/
+src/standalone_cartographer/build/
+src/auto_map/utils/tmp/
 results/
 *.egg-info/

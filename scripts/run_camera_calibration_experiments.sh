@@ -20,8 +20,8 @@ OLD_CAMERA=${OLD_CAMERA:-"$PROJECT_ROOT/ros-data/results/real/20260922/170557_wh
 : "${TIMESTAMPS:?Set TIMESTAMPS to frame_timestamps.csv}"
 : "${LABELS:?Set LABELS to labels2coords.pickle}"
 
-LOCALIZER="$ROOT/vendor/fliftbot_mapping/scripts/evaluation/ceiling_marker_localization_stored_ray_corrected.py"
-AUTO_MAP_DIR="$ROOT/vendor/auto_map"
+LOCALIZER="$ROOT/src/fliftbot_mapping/evaluation/ceiling_marker_localization_stored_ray_corrected.py"
+AUTO_MAP_DIR="$ROOT/src/auto_map"
 VIDEO_PROCESSOR="$AUTO_MAP_DIR/get_video_data.py"
 
 require_file() {

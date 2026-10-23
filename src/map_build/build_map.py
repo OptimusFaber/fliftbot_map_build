@@ -38,6 +38,16 @@ def main() -> int:
     p.add_argument("--result-path-file", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
+    # The child runs with cwd=HERE, so resolve caller-relative paths before
+    # forwarding them. Otherwise e.g. configs/foo is looked up below src/map_build.
+    for attribute in (
+        "recording", "camera_config", "camera_position_file", "lidar_config",
+        "robot_config", "output", "video", "frame_timestamps", "labels2coords",
+        "observations", "result_path_file",
+    ):
+        value = getattr(args, attribute)
+        if value is not None:
+            setattr(args, attribute, value.resolve())
     command = [sys.executable, str(HERE / "run_pipeline.py"),
                "--lidar-config", str(args.lidar_config),
                "--lidar-data", str(args.recording / "horizon"),

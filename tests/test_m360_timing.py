@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "vendor" / "realtime_mapping_scripts"
+SCRIPTS = ROOT / "src" / "realtime_mapping_scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from receive_scan import HEADER, PACKET_SIZE, POINT, POINTS_PER_PACKET, decode_packet  # noqa: E402

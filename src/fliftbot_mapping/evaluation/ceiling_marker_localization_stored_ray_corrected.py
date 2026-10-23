@@ -70,7 +70,7 @@ def merge_markers_with_segment_gate(tracks, radius_m, max_deviation_m):
             })
     return accepted, rejected
 
-def merge_variable_height_markers(tracks, radius_m):
+def merge_variable_height_markers(tracks, radius_m, linkage="complete"):
     """Merge repeated track fragments by map XY, then average their XYZ.
 
     Independent ray fits of the same physical marker can disagree noticeably
@@ -80,17 +80,31 @@ def merge_variable_height_markers(tracks, radius_m):
     # Complete-link clustering: every pair of track centers in one group must
     # be within radius_m.  Connected components are wrong here because a chain
     # A--B--C can merge A and C even when they are more than radius_m apart.
-    pending=set(range(len(tracks))); groups=[]
-    while pending:
-        seed=min(pending); pending.remove(seed); group=[seed]
-        changed=True
-        while changed:
-            changed=False
-            for j in sorted(pending):
-                pj=np.asarray(tracks[j]["point_xy_m"])
-                if all(np.linalg.norm(pj-np.asarray(tracks[i]["point_xy_m"]))<=radius_m for i in group):
-                    pending.remove(j); group.append(j); changed=True
-        groups.append(group)
+    if linkage == "connected":
+        # Merge transitive fragments when each graph edge is within the
+        # requested radius. This is useful when one physical marker has
+        # several pass-dependent lobes linked by intermediate observations.
+        pending=set(range(len(tracks))); groups=[]
+        while pending:
+            seed=min(pending); pending.remove(seed); stack=[seed]; group=[seed]
+            while stack:
+                i=stack.pop(); pi=np.asarray(tracks[i]["point_xy_m"])
+                for j in sorted(pending):
+                    if np.linalg.norm(pi-np.asarray(tracks[j]["point_xy_m"]))<=radius_m:
+                        pending.remove(j); stack.append(j); group.append(j)
+            groups.append(group)
+    else:
+        pending=set(range(len(tracks))); groups=[]
+        while pending:
+            seed=min(pending); pending.remove(seed); group=[seed]
+            changed=True
+            while changed:
+                changed=False
+                for j in sorted(pending):
+                    pj=np.asarray(tracks[j]["point_xy_m"])
+                    if all(np.linalg.norm(pj-np.asarray(tracks[i]["point_xy_m"]))<=radius_m for i in group):
+                        pending.remove(j); group.append(j); changed=True
+            groups.append(group)
     result=[]
     for group in groups:
         weights=np.asarray([tracks[i]["observations"]/max(tracks[i]["spread_m"],.01) for i in group])
@@ -111,6 +125,7 @@ def main():
     p.add_argument("--max-height-sigma-m",type=float,default=.12)
     p.add_argument("--min-height-confidence",type=float,default=.25)
     p.add_argument("--merge-radius-m",type=float,default=.10)
+    p.add_argument("--merge-linkage",choices=("complete","connected"),default="complete")
     p.add_argument("--time-offset-s",type=float,default=0.0)
     p.add_argument("--max-segment-center-deviation-m",type=float,default=None,
                    help="Reject a merged marker when any pass center differs from their median by more than this")
@@ -223,7 +238,7 @@ def main():
                 "observations":int(keep.sum()),"spread_m":spread,"candidate_codes":r["codes"],
                 "code_votes":r["code_votes"]})
     if a.per_track_height:
-        markers=merge_variable_height_markers(tracks,a.merge_radius_m) if tracks else []
+        markers=merge_variable_height_markers(tracks,a.merge_radius_m,a.merge_linkage) if tracks else []
         rejected_segment_disagreement=[]
     else:
         markers,rejected_segment_disagreement=merge_markers_with_segment_gate(

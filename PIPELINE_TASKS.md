@@ -167,7 +167,7 @@ map_build/
 │   ├── web_map/
 │   ├── markers/
 │   └── coordinates/
-├── vendor/
+├── src/
 │   ├── standalone_cartographer/
 │   └── другие необходимые локальные компоненты
 ├── assets/

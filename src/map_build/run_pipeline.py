@@ -19,7 +19,6 @@ from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parents[1]
-VENDOR = PROJECT_ROOT / "vendor"
 DEFAULT_CAMERA_POSITION_M = {"x": 1.077, "y": -0.274, "z": 1.248}
 DEFAULT_CAMERA_ORIENTATION_DEG = {"roll": 0.0, "pitch": 0.0, "yaw": -90.0}
 DEFAULT_WHEELBASE_M = 1.39
@@ -242,11 +241,11 @@ def make_observations(inputs: dict[str, Path | None], run_input: Path, camera_js
     link(video, video_dir / f"{video_dir.name}{video.suffix}")
     link(Path(inputs["frame_timestamps"]), video_dir / "frame_timestamps.csv")
     command = [
-        sys.executable, str(VENDOR / "auto_map/get_video_data.py"),
+        sys.executable, str(PROJECT_ROOT / "src/auto_map/get_video_data.py"),
         "--video", str(video_dir), "--camera-json", str(camera_json),
         "--camera-position", str(camera_position), "--labels", str(inputs["labels2coords"]),
     ]
-    subprocess.run(command, cwd=VENDOR / "auto_map", check=True)
+    subprocess.run(command, cwd=PROJECT_ROOT / "src/auto_map", check=True)
     observations = video_dir / "observations.json"
     if not observations.exists():
         raise RuntimeError("video processor did not create observations.json")
@@ -290,10 +289,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--encoder-speed-sign", type=float, choices=(-1.0, 1.0), help="override encoder velocity sign")
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0), help="steering angle sign (default: robot config or +1)")
+    parser.add_argument("--steering-offset-deg", type=float,
+                        help="constant angle added to encoder steering measurements, degrees")
     parser.add_argument("--odometry-time-offset", type=float, default=0.0,
                         help="seconds added to encoder timestamps before Cartographer")
     parser.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua",
                         help="Lua configuration filename in the Cartographer config directory")
+    parser.add_argument("--cartographer-config-dir", type=Path,
+                        help="optional directory containing the Lua configuration")
     odometry_group = parser.add_mutually_exclusive_group()
     odometry_group.add_argument(
         "--lidar-only", action="store_true",
@@ -400,6 +403,8 @@ def main() -> int:
         lidar["encoder_speed_sign"] = args.encoder_speed_sign
     if args.steering_sign is not None:
         robot["steering_sign"] = args.steering_sign
+    if args.steering_offset_deg is not None:
+        robot["steering_offset_deg"] = args.steering_offset_deg
     if abs(float(lidar["mapping_orientation_deg"].get("roll", 0))) > 1e-9 or abs(float(lidar["mapping_orientation_deg"].get("pitch", 0))) > 1e-9:
         raise ValueError("2D Cartographer cannot apply non-zero LiDAR roll/pitch; level the 3D cloud first")
 
@@ -470,10 +475,12 @@ def main() -> int:
         print(out)
         return 0
 
-    runner = VENDOR / "fliftbot_mapping/scripts/mapping/run_standalone_cartographer.sh"
+    runner = PROJECT_ROOT / "src/map_build/run_standalone_cartographer.sh"
+    config_dir = args.cartographer_config_dir.resolve() if args.cartographer_config_dir else \
+        PROJECT_ROOT / "configs/cartographer"
     mapping_command = [
         str(runner), "--run_dir", str(run_input), "--output", str(map_dir),
-        "--configuration_dir", str(VENDOR / "fliftbot_mapping/config/cartographer"),
+        "--configuration_dir", str(config_dir),
         "--configuration_file", args.cartographer_config,
         "--wheelbase", str(robot["wheelbase_m"]), "--steering_offset_deg", str(robot.get("steering_offset_deg", 0.0)),
         "--steering_sign", str(robot.get("steering_sign", 1.0)),
@@ -497,7 +504,7 @@ def main() -> int:
         observations = make_observations(inputs, run_input, camera_json, camera_position, out)
         marker_dir = out / "markers"
         command = [
-            sys.executable, str(VENDOR / "fliftbot_mapping/scripts/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
+            sys.executable, str(PROJECT_ROOT / "src/fliftbot_mapping/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
             "--observations", str(observations), "--trajectory", str(map_dir / "trajectory.json"),
             "--map-dir", str(map_dir), "--camera-position", str(camera_position),
             "--camera-json", str(camera_json),

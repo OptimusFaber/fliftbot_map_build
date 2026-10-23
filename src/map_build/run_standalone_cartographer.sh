@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD="${ROOT}/standalone_cartographer/build"
-SOURCE="${ROOT}/standalone_cartographer"
+BUILD="${ROOT}/src/standalone_cartographer/build"
+SOURCE="${ROOT}/src/standalone_cartographer"
 if [[ ! -x "${BUILD}/fliftbot_cartographer_offline" || "${SOURCE}/runner.cc" -nt "${BUILD}/fliftbot_cartographer_offline" ]]; then
   cmake -S "${SOURCE}" -B "${BUILD}" -DCMAKE_PREFIX_PATH=/opt/ros/humble
   cmake --build "${BUILD}" -j"$(nproc)"
@@ -16,5 +16,5 @@ for arg in "$@"; do
     exec "${BUILD}/fliftbot_cartographer_offline" "$@"
   fi
 done
-python3 "${ROOT}/scripts/evaluation/check_standalone_inputs.py" "$@"
+python3 "${ROOT}/src/fliftbot_mapping/evaluation/check_standalone_inputs.py" "$@"
 exec "${BUILD}/fliftbot_cartographer_offline" "$@"

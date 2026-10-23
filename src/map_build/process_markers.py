@@ -46,7 +46,7 @@ def main() -> int:
             parser.error(f"{name.replace('_', '-')}: path not found: {getattr(args, name)}")
     command = [
         sys.executable,
-        str(ROOT / "vendor/fliftbot_mapping/scripts/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
+        str(ROOT / "src/fliftbot_mapping/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
         "--observations", str(args.observations), "--trajectory", str(args.trajectory),
         "--map-dir", str(args.map_dir), "--camera-position", str(args.camera_position),
         "--camera-json", str(args.camera_json), "--lidar-config", str(args.lidar_config),

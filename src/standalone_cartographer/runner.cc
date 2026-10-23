@@ -943,6 +943,13 @@ int main(int argc, char** argv) {
                     : Eigen::Vector3f(ext.x, ext.y, ext.z),
                 std::move(ranges), {}});
         ++fed_scans;
+        if (fed_scans % 100 == 0 || fed_scans == scans.size()) {
+          const double percent = scans.empty() ? 100.0
+                                               : 100.0 * fed_scans / scans.size();
+          std::cerr << "PROGRESS scans=" << fed_scans
+                    << " total=" << scans.size()
+                    << " percent=" << percent << "\n";
+        }
       }
     }
     std::cerr << "fed scans=" << fed_scans << " odom=" << fed_odom << ", finishing\n";

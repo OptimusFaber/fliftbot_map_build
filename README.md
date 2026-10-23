@@ -10,7 +10,7 @@ fliftbot_map_build/
 ├── src/map_build/       Python-код пайплайна
 ├── scripts/             вспомогательные shell-скрипты
 ├── tests/               unit-тесты
-├── vendor/              встроенные исходники и runner
+├── src/                 исходники, инструменты и standalone runner
 └── configs/             конфигурации камеры, LiDAR и робота
 ```
 
@@ -61,14 +61,14 @@ Lidar-only запуск этих тяжёлых зависимостей не т
 ```bash
 cd fliftbot_map_build
 source /opt/ros/humble/setup.bash
-cmake -S vendor/fliftbot_mapping/standalone_cartographer \
-      -B vendor/fliftbot_mapping/standalone_cartographer/build \
+cmake -S src/standalone_cartographer \
+      -B src/standalone_cartographer/build \
       -DCMAKE_PREFIX_PATH=/opt/ros/humble -DCMAKE_BUILD_TYPE=Release
-cmake --build vendor/fliftbot_mapping/standalone_cartographer/build -j"$(nproc)"
+cmake --build src/standalone_cartographer/build -j"$(nproc)"
 ```
 
 Это наша обвязка над Cartographer, а не изменённая системная библиотека.
-Изменённые runner и Lua-конфигурации находятся в `vendor/`.
+Изменённый runner находится в `src/standalone_cartographer/`, Lua-конфигурации — в `configs/cartographer/`.
 
 ## Полный запуск из сырых данных
 
