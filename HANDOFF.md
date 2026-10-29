@@ -1,5 +1,8 @@
 # Handoff: mapping pipeline (2026-10-16)
 
+> Исторический срез на 2026-10-16. Текущие команды находятся в `README.md`,
+> а актуальная проверка высоты меток — в `docs/marker_height_block_cv.md`.
+
 Короткий контекст для продолжения работы другим агентом. Основной проект:
 `/home/optimus/ros-projects/fliftbot_map_build`.
 

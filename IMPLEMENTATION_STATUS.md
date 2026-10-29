@@ -1,5 +1,8 @@
 # Статус реализации
 
+> Этот файл описывает ранний этап пайплайна. Текущая проверка высоты меток и
+> её ограничения описаны в `docs/marker_height_block_cv.md`.
+
 ## Работает
 
 - `convert_recording.py`: M360RAW1 → `horizon/*.npz`, move logger/encoder CSV →

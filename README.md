@@ -51,8 +51,12 @@ python -m pip install -r requirements-video.txt
 ```
 
 Lidar-only запуск этих тяжёлых зависимостей не требует. Файл маркерной разметки
-`labels2coords` является входными данными конкретного склада и передаётся через
-`--labels2coords`; в репозиторий он намеренно не включён.
+`labels2coords` является необязательным входом конкретного склада и передаётся
+через `--labels2coords`. Без него observations сохраняются по tracker ID с
+`code=-1`; геометрическая локализация и оценка высоты по трекам остаются доступны.
+Для создания новых observations нужен также доступный модуль `CameraModel` из
+`fliftbot_navigation`; существующие observations с сохранёнными лучами можно
+обрабатывать без него.
 
 ## Сборка standalone Cartographer
 
@@ -116,6 +120,10 @@ python src/map_build/process_markers.py --run-dir ../ros-data/results/<run_id>
 ```
 
 В каталоге `markers/` сохраняется собственный `run_parameters.json`.
+
+Для независимой оценки высоты по трекам, проверки по участкам пути,
+воспроизводимых команд и сравнения двух записей см.
+[`docs/marker_height_block_cv.md`](docs/marker_height_block_cv.md).
 
 Для текущего M360-тракта проверен контракт `mapping_yaw=180`,
 `steering_sign=+1`; для move logger `.log` обычно нужен
