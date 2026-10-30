@@ -194,6 +194,24 @@ NPZ содержит `xy` (N×2, метры), `t` (времена лучей), `
 Cartographer. В `build_from_raw.py --dry-run` сырые данные сначала
 **конвертируются**. Запуски записываются в `OUTPUT/YYYYMMDD_HHMMSS_NAME`.
 
+## Записи fliftbot_sim
+
+```bash
+PYTHONNOUSERSITE=1 /usr/bin/python3 src/map_build/import_sim_recording.py \
+  --recording /data/sim_run --output /data/canonical/sim01
+PYTHONNOUSERSITE=1 /usr/bin/python3 src/map_build/build_from_canonical.py \
+  --recording /data/canonical/sim01 --output /data/results --name sim01 \
+  --deploy-output /data/deploy/sim01
+```
+
+Импорт принимает RUN или RUN/lidar, переводит старый LiDAR config в component-схему,
+переносит NPZ и измеренные энкодеры; GT и глобальные odom-поля исключаются.
+Исходная запись не изменяется. Времена сохраняются в simulation time;
+параметры физического LiDAR не подставляются в симуляционные данные.
+Для live-проверки той же карты используйте соседний
+`fliftbot_lidar_nav/nav.sh sim --map-dir /data/deploy/sim01`.
+Подробная [сквозная инструкция](../fliftbot_lidar_nav/docs/pipeline.md).
+
 ## Пересчёт только меток
 
 ```bash
@@ -266,10 +284,12 @@ python src/map_build/package_bundle.py --run /data/results/RUN --output /data/de
 
 Либо передайте `--deploy-output /data/deploy/run01` в полный запуск.
 Deploy содержит `map.pbstream`, occupancy, web-изображения, матрицы,
-`map_metadata.json`, `origin_reference.json` и manifest с SHA-256.
+`map_metadata.json`, `origin_reference.json`, `navigation_config.json` и manifest с SHA-256.
 PBStream обязателен для continuous Cartographer localization; JPEG/PGM его
-не заменяют. Копирование в `realtime_mapping` и переключение активной карты
-выполняются отдельно. Подробности координат — [контракт](docs/pipeline_contract.md).
+не заменяют. Эффективная калибровка LiDAR и одометрии хранится в
+`navigation_config.json`. Bundle принимает `fliftbot_lidar_nav/nav.sh check-map --map-dir /data/deploy/run01`;
+`live --sensor dephan --map-dir /data/deploy/run01` запускает локализацию.
+Передача позы ContinuousNav управляется `send_to_navigation:=true|false`. Подробности координат — [контракт](docs/pipeline_contract.md).
 
 ## Проверка и структура
 
@@ -283,7 +303,7 @@ python src/map_build/validate_bundle.py /data/results/RUN
 Все публичные инструменты имеют `--help`: `convert_recording.py`,
 `build_from_raw.py`, `build_from_canonical.py`, `build_map.py`,
 `build_web_map.py`, `edit_web_map.py`, `process_markers.py`, `set_map_origin.py`,
-`validate_recording.py`, `validate_bundle.py`, `package_bundle.py`.
+`validate_recording.py`, `validate_bundle.py`, `package_bundle.py`, `import_sim_recording.py`.
 `scripts/` содержит отдельные инструменты анализа/конвертации с собственными CLI.
 
 ```text

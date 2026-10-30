@@ -97,4 +97,14 @@ Deploy — отдельный каталог с `map.pbstream`, `map.pgm/png/yam
 origin и угол осей в исходной карте. Для continuous localization необходим
 PBStream. Runtime-файлы исходных видео, raw scan, GT и experiments в deploy
 не включаются. Упаковка не переключает карту и не меняет конфиги
-`realtime_mapping`.
+`fliftbot_lidar_nav`.
+
+
+Deploy включает `navigation_config.json` (`fliftbot.navigation_config.v1`):
+LiDAR type/points frame, scan_to_base XY/yaw, максимальная дальность и
+одометрию (speed sign, steering sign/zero, wheelbase, drive_wheel model).
+Источником служит эффективный `run_parameters.json`, включая CLI overrides.
+Неполный RUN не упаковывается, непустой deploy не перезаписывается.
+`fliftbot_lidar_nav/nav.sh check-map --map-dir DEPLOY` проверяет SHA-256,
+конфиги, occupancy и соответствие reference матрице.
+Связанный pipeline: [simulation → map → localization](../../fliftbot_lidar_nav/docs/pipeline.md).
