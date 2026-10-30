@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+import argparse
 import itertools, json, math
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 TARGETS = [7, 4, 18, 22]
 
@@ -27,7 +28,6 @@ def main(folder: Path, targets=None, suffix="7_4_18_22"):
         "distances_m": distances,
     }, indent=2) + "\n")
 
-    map_dir = folder / ".." / "map"
     # The map image is alongside the marker output in the run's map directory.
     map_dir = folder.parent / "map"
     meta = {}
@@ -56,7 +56,9 @@ def main(folder: Path, targets=None, suffix="7_4_18_22"):
     image.save(folder / f"marker_distances_{suffix}.png")
 
 if __name__ == "__main__":
-    import sys
-    labels = [int(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2 else TARGETS
-    suffix = "_".join(str(x) for x in labels)
-    main(Path(sys.argv[1]), labels, suffix)
+    parser = argparse.ArgumentParser(description="Annotate pairwise XY distances between selected marker IDs")
+    parser.add_argument("folder", type=Path, help="marker output directory alongside map/")
+    parser.add_argument("targets", help="comma-separated numeric suffixes of marker IDs, e.g. 7,4,18,22")
+    args = parser.parse_args()
+    targets = [int(value) for value in args.targets.split(",")]
+    main(args.folder, targets, "_".join(map(str, targets)))

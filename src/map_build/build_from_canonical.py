@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import shutil
@@ -12,6 +13,8 @@ import tempfile
 import warnings
 from pathlib import Path
 import numpy as np
+
+from marker_profiles import add_marker_options, forward_marker_options
 
 HERE = Path(__file__).resolve().parent
 
@@ -96,6 +99,14 @@ def export_marker_coordinates(run_dir: Path) -> None:
                 "markers": markers}
     (marker_dir / "markers_map.json").write_text(
         json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    with (marker_dir / "markers_map.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["marker_id", "decoder_label", "pbstream_x_m", "pbstream_y_m", "height_m",
+                         "local_x_m", "local_y_m", "raster_u_px", "raster_v_px"])
+        for marker in markers:
+            writer.writerow([marker["marker_id"], marker["decoder_label"],
+                             *marker["pbstream_map_xyz_m"], *marker["local_map_xyz_m"][:2],
+                             *marker["web_raster_uv_px"]])
     rendered = marker_dir / "stored_ray_corrected_map.png"
     if rendered.is_file():
         shutil.copy2(rendered, marker_dir / "markers_map.png")
@@ -134,6 +145,7 @@ def main() -> int:
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--mapping-yaw", type=float)
     parser.add_argument("--odometry-time-offset", type=float, default=0.0)
+    parser.add_argument("--marker-time-offset", type=float)
     parser.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua")
     parser.add_argument("--web-resolution-m-per-px", type=float, default=0.01)
     parser.add_argument("--no-web-align", action="store_true")
@@ -146,8 +158,8 @@ def main() -> int:
     parser.add_argument("--frame-timestamps", type=Path)
     parser.add_argument("--labels2coords", type=Path)
     parser.add_argument("--observations", type=Path)
-    parser.add_argument("--ceiling-z", type=float)
     parser.add_argument("--dry-run", action="store_true")
+    add_marker_options(parser)
     args = parser.parse_args()
 
     # Resolve paths while still in the caller's working directory. Child
@@ -193,7 +205,10 @@ def main() -> int:
         if args.mapping_yaw is not None:
             command += ["--mapping-yaw", str(args.mapping_yaw)]
         command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+        if args.marker_time_offset is not None:
+            command += ["--marker-time-offset", str(args.marker_time_offset)]
         command += ["--cartographer-config", args.cartographer_config]
+        forward_marker_options(command, args)
         run(command)
         print(output)
         return 0
@@ -215,15 +230,17 @@ def main() -> int:
         if args.mapping_yaw is not None:
             command += ["--mapping-yaw", str(args.mapping_yaw)]
         command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+        if args.marker_time_offset is not None:
+            command += ["--marker-time-offset", str(args.marker_time_offset)]
         command += ["--cartographer-config", args.cartographer_config]
         marker_inputs = (("--video", args.video), ("--frame-timestamps", args.frame_timestamps),
-                         ("--labels2coords", args.labels2coords), ("--observations", args.observations),
-                         ("--ceiling-z", args.ceiling_z))
-        if args.observations or (args.video and args.frame_timestamps and args.labels2coords):
+                         ("--labels2coords", args.labels2coords), ("--observations", args.observations))
+        if args.observations or (args.video and args.frame_timestamps):
             command.append("--with-markers")
         for option, value in marker_inputs:
             if value is not None:
                 command += [option, str(value)]
+        forward_marker_options(command, args)
         run(command)
         run_dir = Path(Path(marker.name).read_text(encoding="utf-8").strip()).resolve()
     shutil.copy2(validation, run_dir / "recording_validation_report.json")

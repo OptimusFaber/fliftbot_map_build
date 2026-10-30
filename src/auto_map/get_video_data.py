@@ -17,6 +17,9 @@ from numpy import typing as npt
 import yaml
 
 AUTO_MAP_DIR = Path(__file__).resolve().parent
+_PROJECT_SRC = AUTO_MAP_DIR.parent
+if str(_PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_SRC))
 _NAV_ROOT = AUTO_MAP_DIR.parent / "fliftbot_navigation-navigation_INS@7014eb114e3"
 if _NAV_ROOT.is_dir():
     sys.path.insert(0, str(_NAV_ROOT))

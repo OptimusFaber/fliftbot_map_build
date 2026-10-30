@@ -1,0 +1,20 @@
+{
+  "schema": "fliftbot.marker_profile.v1",
+  "description": "Low markers and shorter visible tracks; validate on the actual test site.",
+  "parameters": {
+    "per_track_height": true,
+    "stationary_height_filter": true,
+    "min_segment_observations": 8,
+    "min_camera_baseline_m": 0.25,
+    "merge_radius_m": 0.6,
+    "max_track_height_uncertainty_m": 0.25,
+    "height_quality_method": "block_cv",
+    "block_distance_m": 0.05,
+    "max_block_height_instability_m": 0.3,
+    "stationary_group_radius_m": 0.02,
+    "stationary_max_group_fraction": 0.5,
+    "stationary_min_groups": 8,
+    "max_marker_height_m": null,
+    "ceiling_z": null
+  }
+}

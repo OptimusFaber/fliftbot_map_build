@@ -233,7 +233,8 @@ def render(path: Path, map_dir: Path, trajectory: np.ndarray, origins: np.ndarra
         for index, row in enumerate(markers, 1):
             x, y, z = row["point_xyz_m"]
             marker_id = row.get("marker_id", f"marker_{index:03d}").replace("marker_", "")
-            ax.annotate(f"{marker_id} · {z:.2f} m", (x, y), xytext=(4, 4),
+            z_label=f"{z:.2f} m" if z is not None else "height n/a"
+            ax.annotate(f"{marker_id} · {z_label}", (x, y), xytext=(4, 4),
                         textcoords="offset points", fontsize=5.5, color="#991b1b",
                         bbox={"boxstyle":"round,pad=0.15", "facecolor":"white",
                               "edgecolor":"none", "alpha":0.72})

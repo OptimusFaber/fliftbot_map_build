@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from marker_profiles import add_marker_options, forward_marker_options
+
 HERE = Path(__file__).resolve().parent
 
 def main() -> int:
@@ -28,15 +30,16 @@ def main() -> int:
     p.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0))
     p.add_argument("--mapping-yaw", type=float)
     p.add_argument("--odometry-time-offset", type=float, default=0.0)
+    p.add_argument("--marker-time-offset", type=float)
     p.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua")
     p.add_argument("--with-markers", action="store_true")
     p.add_argument("--video", type=Path)
     p.add_argument("--frame-timestamps", type=Path)
     p.add_argument("--labels2coords", type=Path)
     p.add_argument("--observations", type=Path)
-    p.add_argument("--ceiling-z", type=float)
     p.add_argument("--result-path-file", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--dry-run", action="store_true")
+    add_marker_options(p)
     args = p.parse_args()
     # The child runs with cwd=HERE, so resolve caller-relative paths before
     # forwarding them. Otherwise e.g. configs/foo is looked up below src/map_build.
@@ -62,8 +65,7 @@ def main() -> int:
             if value is not None: command += [f"--{prefix}-{axis}", str(value)]
     command.append("--with-markers" if args.with_markers else "--no-markers")
     for option, value in (("--video", args.video), ("--frame-timestamps", args.frame_timestamps),
-                          ("--labels2coords", args.labels2coords), ("--observations", args.observations),
-                          ("--ceiling-z", args.ceiling_z)):
+                          ("--labels2coords", args.labels2coords), ("--observations", args.observations)):
         if value is not None:
             command += [option, str(value)]
     if args.lidar_only:
@@ -79,11 +81,14 @@ def main() -> int:
     if args.mapping_yaw is not None:
         command += ["--mapping-yaw", str(args.mapping_yaw)]
     command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+    if args.marker_time_offset is not None:
+        command += ["--marker-time-offset", str(args.marker_time_offset)]
     command += ["--cartographer-config", args.cartographer_config]
     if args.result_path_file:
         command += ["--result-path-file", str(args.result_path_file)]
     if args.dry_run:
         command.append("--dry-run")
+    forward_marker_options(command, args)
     return subprocess.call(command, cwd=HERE)
 
 if __name__ == "__main__":

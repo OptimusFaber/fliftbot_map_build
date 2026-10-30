@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from marker_profiles import add_marker_options, forward_marker_options
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -17,6 +19,11 @@ def main() -> int:
     parser.add_argument(
         "--m360-point-time-mode", choices=("packet-host", "device-linear"),
         default="packet-host")
+    parser.add_argument(
+        "--rplidar-point-time-mode",
+        choices=("azimuth-device-end", "azimuth-host-end",
+                 "azimuth-device-start", "legacy-device"),
+        default="azimuth-device-end")
     parser.add_argument("--lidar-start-unix", type=float)
     parser.add_argument("--lidar-end-unix", type=float)
     parser.add_argument("--canonical-output", type=Path, required=True)
@@ -37,6 +44,7 @@ def main() -> int:
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0))
     parser.add_argument("--mapping-yaw", type=float)
     parser.add_argument("--odometry-time-offset", type=float, default=0.0)
+    parser.add_argument("--marker-time-offset", type=float)
     parser.add_argument("--web-resolution-m-per-px", type=float, default=0.01)
     parser.add_argument("--no-web-align", action="store_true")
     parser.add_argument("--origin-map-xy", type=float, nargs=2, metavar=("X", "Y"))
@@ -48,8 +56,8 @@ def main() -> int:
     parser.add_argument("--frame-timestamps", type=Path)
     parser.add_argument("--labels2coords", type=Path)
     parser.add_argument("--observations", type=Path)
-    parser.add_argument("--ceiling-z", type=float)
     parser.add_argument("--dry-run", action="store_true")
+    add_marker_options(parser)
     args = parser.parse_args()
 
     # Resolve user-provided paths before starting child processes with
@@ -71,11 +79,15 @@ def main() -> int:
         if value is not None:
             convert += [option, str(value)]
     convert += ["--m360-point-time-mode", args.m360_point_time_mode]
+    convert += ["--rplidar-point-time-mode", args.rplidar_point_time_mode]
     if args.lidar_start_unix is not None:
         convert += ["--lidar-start-unix", str(args.lidar_start_unix)]
     if args.lidar_end_unix is not None:
         convert += ["--lidar-end-unix", str(args.lidar_end_unix)]
-    subprocess.run(convert, cwd=HERE, check=True)
+    args.canonical_output.mkdir(parents=True, exist_ok=True)
+    conversion_log = args.canonical_output / "conversion.log"
+    with conversion_log.open("w", encoding="utf-8") as log:
+        subprocess.run(convert, cwd=HERE, check=True, stdout=log)
     command = [sys.executable, str(HERE / "build_from_canonical.py"),
                "--recording", str(args.canonical_output), "--output", str(args.output),
                "--name", args.name, "--web-resolution-m-per-px", str(args.web_resolution_m_per_px)]
@@ -103,6 +115,8 @@ def main() -> int:
     if args.mapping_yaw is not None:
         command += ["--mapping-yaw", str(args.mapping_yaw)]
     command += ["--odometry-time-offset", str(args.odometry_time_offset)]
+    if args.marker_time_offset is not None:
+        command += ["--marker-time-offset", str(args.marker_time_offset)]
     if args.origin_map_xy:
         command += ["--origin-map-xy", *map(str, args.origin_map_xy),
                     "--origin-yaw-deg", str(args.origin_yaw_deg), "--origin-name", args.origin_name]
@@ -111,10 +125,10 @@ def main() -> int:
                     "--origin-yaw-deg", str(args.origin_yaw_deg), "--origin-name", args.origin_name]
     for option, value in (("--deploy-output", args.deploy_output), ("--video", args.video),
                           ("--frame-timestamps", args.frame_timestamps),
-                          ("--labels2coords", args.labels2coords), ("--observations", args.observations),
-                          ("--ceiling-z", args.ceiling_z)):
+                          ("--labels2coords", args.labels2coords), ("--observations", args.observations)):
         if value is not None:
             command += [option, str(value)]
+    forward_marker_options(command, args)
     return subprocess.call(command, cwd=HERE)
 
 

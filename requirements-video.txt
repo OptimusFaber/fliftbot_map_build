@@ -2,9 +2,9 @@
 torch
 torchvision
 ultralytics
-scipy
 tqdm
 PyYAML
 line_profiler
 lap
 cython-bbox
+onnxruntime
