@@ -45,6 +45,21 @@ class PipelineOptionsTest(unittest.TestCase):
             self.assertEqual(result["tracking_frame"], "rotation_axis")
             self.assertAlmostEqual(result["poses"][-1]["x"], 0.1)
 
+    def test_wheel_odometry_repairs_short_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            encoder = root / "encoder.jsonl"
+            encoder.write_text(
+                '{"enc_unix":1.0,"enc_v":1.0,"enc_dgr":0.0}\n'
+                '{"enc_unix":2.05,"enc_v":1.0,"enc_dgr":0.0}\n')
+            output = root / "trajectory.json"
+            wheel_odometry_trajectory(encoder, output, {"wheelbase_m": 1.39}, 1.0)
+            import json
+            result = json.loads(output.read_text())
+            self.assertAlmostEqual(result["poses"][-1]["x"], 1.05)
+            self.assertEqual(result["encoder_gap_repair"]["repaired_gaps"], 1)
+            self.assertGreater(result["encoder_gap_repair"]["inserted_samples"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

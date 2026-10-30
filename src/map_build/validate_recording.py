@@ -18,6 +18,15 @@ def interval_stats(values: list[float]) -> dict:
             "maximum_gap_s": (float(np.max(gaps)) if len(gaps) else 0.0)}
 
 
+def moving_encoder_gaps(rows: list[tuple[float, float, float]], threshold: float) -> list[float]:
+    result = []
+    for left, right in zip(rows, rows[1:]):
+        gap = right[0] - left[0]
+        if gap > threshold and (abs(left[1]) > 1e-6 or abs(right[1]) > 1e-6):
+            result.append(gap)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("recording", type=Path)
@@ -34,7 +43,10 @@ def main() -> int:
     for path in files:
         try:
             with np.load(path) as data:
-                stamps.append(float(np.asarray(data["stamp"]).reshape(())))
+                stamp = float(np.asarray(data["stamp"]).reshape(()))
+                if not np.isfinite(stamp):
+                    raise ValueError("non-finite LiDAR timestamp")
+                stamps.append(stamp)
                 if data["xy"].ndim != 2 or data["xy"].shape[1] != 2:
                     bad_npz += 1
         except Exception:
@@ -55,6 +67,8 @@ def main() -> int:
                 encoder_rows.append(values)
             except Exception:
                 report["errors"].append(f"invalid encoder row {number}")
+    if encoder_path.is_file() and not encoder_rows:
+        report["errors"].append("encoder.jsonl contains no valid samples")
     if any(right <= left for left, right in zip(stamps, stamps[1:])):
         report["errors"].append("LiDAR timestamps are not strictly increasing in file order")
     encoder_times = [row[0] for row in encoder_rows]
@@ -80,6 +94,26 @@ def main() -> int:
                 report["warnings"].append(f"encoder ends {stamps[-1] - encoder_times[-1]:.6f}s before LiDAR")
         if moving == 0:
             report["warnings"].append("encoder velocity is zero for all samples")
+        moving_gaps = moving_encoder_gaps(encoder_rows, 0.2)
+        if moving_gaps:
+            report["encoder"]["moving_gaps_over_0_2_s"] = len(moving_gaps)
+            report["warnings"].append(
+                f"encoder gaps while moving: {len(moving_gaps)}, maximum {max(moving_gaps):.6f}s"
+            )
+        unrecoverable_gaps = [gap for gap in moving_gaps if gap > 1.5]
+        if unrecoverable_gaps:
+            report["errors"].append(
+                "encoder gap while moving exceeds repair limit: "
+                f"{max(unrecoverable_gaps):.6f}s"
+            )
+    if stamps:
+        lidar_gaps = [right - left for left, right in zip(stamps, stamps[1:])
+                      if right - left > 0.1]
+        if lidar_gaps:
+            report["lidar"]["gaps_over_0_1_s"] = len(lidar_gaps)
+            report["warnings"].append(
+                f"LiDAR gaps: {len(lidar_gaps)}, maximum {max(lidar_gaps):.6f}s"
+            )
     report["status"] = "rejected" if report["errors"] else (
         "accepted_with_warnings" if report["warnings"] else "accepted")
     text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"

@@ -17,6 +17,9 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from marker_profiles import (add_marker_options,
+                             resolve_marker_parameters, marker_command_options)
+
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parents[1]
 DEFAULT_CAMERA_POSITION_M = {"x": 1.077, "y": -0.274, "z": 1.248}
@@ -167,6 +170,27 @@ def wheel_odometry_trajectory(encoder_path: Path, output: Path, robot: dict[str,
         if item.get("enc_available", True):
             rows.append((float(item["enc_unix"]), float(item["enc_v"]), float(item["enc_dgr"])))
     rows = sorted(dict((row[0], row) for row in rows).values())
+    repaired_rows = []
+    repaired_gaps = 0
+    inserted_samples = 0
+    maximum_gap_s = 0.0
+    for index, current in enumerate(rows):
+        if index:
+            previous = rows[index - 1]
+            gap = current[0] - previous[0]
+            maximum_gap_s = max(maximum_gap_s, gap)
+            if 0.5 < gap <= 1.5:
+                segments = math.ceil(gap / 0.1)
+                for segment in range(1, segments):
+                    fraction = segment / segments
+                    repaired_rows.append(tuple(
+                        previous[column] + fraction * (current[column] - previous[column])
+                        for column in range(3)
+                    ))
+                    inserted_samples += 1
+                repaired_gaps += 1
+        repaired_rows.append(current)
+    rows = repaired_rows
     wheelbase = float(robot["wheelbase_m"])
     steering_sign = float(robot.get("steering_sign", 1.0))
     steering_offset = math.radians(float(robot.get("steering_offset_deg", 0.0)))
@@ -197,6 +221,11 @@ def wheel_odometry_trajectory(encoder_path: Path, output: Path, robot: dict[str,
                         "wheelbase_m": wheelbase, "encoder_speed_sign": speed_sign,
                         "steering_sign": steering_sign,
                         "steering_offset_deg": float(robot.get("steering_offset_deg", 0.0)),
+                        "encoder_gap_repair": {
+                            "maximum_gap_s": maximum_gap_s,
+                            "repaired_gaps": repaired_gaps,
+                            "inserted_samples": inserted_samples,
+                        },
                         "poses": poses})
 
 
@@ -232,9 +261,9 @@ def make_observations(inputs: dict[str, Path | None], run_input: Path, camera_js
     existing = inputs.get("observations")
     if existing:
         return Path(existing)
-    required = ("video", "frame_timestamps", "labels2coords")
+    required = ("video", "frame_timestamps")
     if any(not inputs.get(key) for key in required):
-        raise ValueError("markers need observations or video + frame_timestamps + labels2coords")
+        raise ValueError("markers need observations or video + frame_timestamps")
     video_dir = run_input / "video"
     video_dir.mkdir()
     video = Path(inputs["video"])
@@ -243,8 +272,10 @@ def make_observations(inputs: dict[str, Path | None], run_input: Path, camera_js
     command = [
         sys.executable, str(PROJECT_ROOT / "src/auto_map/get_video_data.py"),
         "--video", str(video_dir), "--camera-json", str(camera_json),
-        "--camera-position", str(camera_position), "--labels", str(inputs["labels2coords"]),
+        "--camera-position", str(camera_position),
     ]
+    if inputs.get("labels2coords"):
+        command += ["--labels", str(inputs["labels2coords"])]
     subprocess.run(command, cwd=PROJECT_ROOT / "src/auto_map", check=True)
     observations = video_dir / "observations.json"
     if not observations.exists():
@@ -279,20 +310,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-x", type=float); parser.add_argument("--camera-y", type=float); parser.add_argument("--camera-z", type=float)
     parser.add_argument("--camera-roll", type=float); parser.add_argument("--camera-pitch", type=float); parser.add_argument("--camera-yaw", type=float)
     parser.add_argument("--wheelbase", type=float, help="override wheelbase in metres")
-    parser.add_argument(
-        "--fork-position", choices=("raised", "lowered"), default="raised",
-        help="fork position; lowered adds the configured longitudinal geometry offset (default: raised)",
-    )
-    parser.add_argument(
-        "--lowered-forks-offset-m", type=float, default=0.05,
-        help="longitudinal offset added to camera x, LiDAR x and wheelbase for lowered forks",
-    )
+    parser.add_argument("--fork-position", choices=("raised", "lowered"), default="raised",
+                        help="fork position used for camera/LiDAR/wheelbase geometry")
+    parser.add_argument("--lowered-forks-offset-m", type=float, default=0.05,
+                        help="longitudinal offset added to camera x, LiDAR x and wheelbase for lowered forks")
     parser.add_argument("--encoder-speed-sign", type=float, choices=(-1.0, 1.0), help="override encoder velocity sign")
     parser.add_argument("--steering-sign", type=float, choices=(-1.0, 1.0), help="steering angle sign (default: robot config or +1)")
     parser.add_argument("--steering-offset-deg", type=float,
                         help="constant angle added to encoder steering measurements, degrees")
     parser.add_argument("--odometry-time-offset", type=float, default=0.0,
                         help="seconds added to encoder timestamps before Cartographer")
+    parser.add_argument("--marker-time-offset", type=float,
+                        help="seconds added to camera frame timestamps during marker localization")
     parser.add_argument("--cartographer-config", default="fliftbot_2d_offline.lua",
                         help="Lua configuration filename in the Cartographer config directory")
     parser.add_argument("--cartographer-config-dir", type=Path,
@@ -309,9 +338,9 @@ def parse_args() -> argparse.Namespace:
     marker_group = parser.add_mutually_exclusive_group()
     marker_group.add_argument("--with-markers", action="store_true", help="build marker overlay")
     marker_group.add_argument("--no-markers", action="store_true", help="skip marker processing")
-    parser.add_argument("--ceiling-z", type=float, help="measured ceiling height in metres")
     parser.add_argument("--dry-run", action="store_true", help="validate and materialize inputs only")
     parser.add_argument("--result-path-file", type=Path, help=argparse.SUPPRESS)
+    add_marker_options(parser)
     return parser.parse_args()
 
 
@@ -351,6 +380,8 @@ def main() -> int:
     }
     camera["position_m"] = dict(camera["position_m"])
     camera["orientation_deg"] = dict(camera.get("orientation_deg", DEFAULT_CAMERA_ORIENTATION_DEG))
+    marker_time_offset = (float(args.marker_time_offset) if args.marker_time_offset is not None
+                          else float(camera.get("time_offset_s", 0.0)))
     if args.camera_position_file:
         sidecar_position, sidecar_angles = read_camera_position_file(args.camera_position_file.resolve())
         if not camera_path:
@@ -421,6 +452,7 @@ def main() -> int:
     if not inputs.get("lidar") or not inputs.get("encoder"):
         raise ValueError("lidar and encoder inputs are required")
 
+    marker_parameters, marker_profile = resolve_marker_parameters(args, spec.get("markers", {}))
     root = (args.output or resolve(base, spec.get("output")) or (PROJECT_ROOT / "ros-data/results")).resolve()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = args.name or spec.get("name", "mapping")
@@ -448,8 +480,9 @@ def main() -> int:
         markers["enabled"] = True
     if args.no_markers:
         markers["enabled"] = False
-    if args.ceiling_z is not None:
-        markers["ceiling_z_m"] = args.ceiling_z
+    markers.update(marker_parameters)
+    markers["time_offset_s"] = marker_time_offset
+    markers["profile"] = marker_profile
     resolved = {
         "schema": "fliftbot.integrated_mapping_parameters.v1", "created_at": datetime.now(timezone.utc).isoformat(),
         "source_config": str(config_path) if config_path else None, "camera": camera, "lidar": lidar, "robot": robot,
@@ -509,14 +542,15 @@ def main() -> int:
             "--map-dir", str(map_dir), "--camera-position", str(camera_position),
             "--camera-json", str(camera_json),
             "--lidar-config", str(run_input / "lidar.markers.config"), "--out-dir", str(marker_dir),
+            "--time-offset-s", str(marker_time_offset),
         ]
-        if markers.get("ceiling_z_m") is not None:
-            command += ["--ceiling-z", str(markers["ceiling_z_m"])]
+        command += marker_command_options(marker_parameters)
         write_json(marker_dir / "run_parameters.json", {
             "schema": "fliftbot.marker_run_parameters.v1",
             "camera": camera, "lidar": marker_lidar_runtime,
             "inputs": {"observations": str(observations), "trajectory": str(map_dir / "trajectory.json")},
-            "parameters": markers, "command": command,
+            "profile": marker_profile,
+            "parameters": {**marker_parameters, "time_offset_s": marker_time_offset}, "command": command,
         })
         subprocess.run(command, check=True)
         shutil.copy2(marker_dir / "stored_ray_corrected_map.png", out / "map_with_markers.png")

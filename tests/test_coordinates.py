@@ -1,4 +1,5 @@
 import json
+import csv
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,28 @@ SRC = ROOT / "src" / "map_build"
 
 
 class CoordinatePipelineTest(unittest.TestCase):
+    def test_marker_export_preserves_unknown_height(self):
+        sys.path.insert(0, str(SRC))
+        from build_from_canonical import export_marker_coordinates
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'web_map').mkdir()
+            (root / 'markers').mkdir()
+            np.save(root / 'web_map/pbstream_to_local_matrix.npy',
+                    np.array([[1, 0, -2], [0, 1, -3], [0, 0, 1]]))
+            np.save(root / 'web_map/pbstream_to_raster_matrix.npy',
+                    np.array([[10, 0, 100], [0, -10, 100], [0, 0, 1]]))
+            (root / 'markers/marker_points_stored_ray_corrected.json').write_text(json.dumps({
+                'status': 'accepted', 'markers': [{'marker_id': 'marker_001', 'point_xyz_m': [2, 3, None]}]}))
+            export_marker_coordinates(root)
+            marker = json.loads((root / 'markers/markers_map.json').read_text())['markers'][0]
+            self.assertEqual(marker['local_map_xyz_m'], [0, 0, None])
+            self.assertEqual(marker['web_raster_uv_px'], [120, 70])
+            with (root / 'markers/markers_map.csv').open() as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(row['height_m'], '')
+            self.assertEqual(float(row['raster_v_px']), 70)
+
     def test_web_matrices_and_origin_invariant(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 MAP_BUILD = ROOT / "src" / "map_build"
 sys.path.insert(0, str(MAP_BUILD))
-from build_from_canonical import export_marker_coordinates, refresh_artifacts  # noqa: E402
+from marker_profiles import add_marker_options, forward_marker_options  # noqa: E402
 
 
 def read(path: Path) -> dict:
@@ -95,12 +94,7 @@ def main() -> int:
     p.add_argument("--second-timestamps", type=Path, required=True)
     p.add_argument("--labels2coords", type=Path,
                    help="optional decoder codebook; omit to use tracker-based marker numbering")
-    p.add_argument("--ceiling-z", type=float,
-                   help="fixed common marker plane; omit to estimate each marker height independently")
-    p.add_argument("--merge-radius-m", type=float, default=0.50,
-                   help="XY radius for merging repeated physical marker tracks (default: 0.50)")
-    p.add_argument("--min-segment-observations", type=int, default=20,
-                   help="minimum observations required for independent track triangulation")
+    add_marker_options(p)
     p.add_argument("--group-by-code", action="store_true")
     args = p.parse_args()
 
@@ -152,27 +146,12 @@ def main() -> int:
     merged_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     marker_dir = run / "markers"
-    command = [
-        sys.executable,
-        str(SRC / "fliftbot_mapping/evaluation/ceiling_marker_localization_stored_ray_corrected.py"),
-        "--observations", str(merged_path), "--trajectory", str(trajectory),
-        "--map-dir", str(run / "map"), "--camera-position", str(camera_position),
-        "--lidar-config", str(lidar_config), "--out-dir", str(marker_dir),
-        "--merge-radius-m", str(args.merge_radius_m),
-        "--min-segment-observations", str(args.min_segment_observations),
-    ]
-    if args.ceiling_z is None:
-        command.append("--per-track-height")
-    else:
-        command += ["--ceiling-z", str(args.ceiling_z)]
+    command = [sys.executable, str(MAP_BUILD / "process_markers.py"),
+               "--run-dir", str(run), "--observations", str(merged_path)]
+    forward_marker_options(command, args)
     if args.group_by_code:
         command.append("--group-by-code")
     subprocess.run(command, check=True)
-    rendered = marker_dir / "stored_ray_corrected_map.png"
-    if rendered.is_file():
-        shutil.copy2(rendered, run / "map_with_markers.png")
-    export_marker_coordinates(run)
-    refresh_artifacts(run)
     print(json.dumps({
         "map_run": str(run), "merged_observations": str(merged_path),
         "frames": len(merged_frames), "first_cutoff_unix": cutoff,

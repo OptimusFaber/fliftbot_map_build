@@ -17,7 +17,12 @@ from zoneinfo import ZoneInfo
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "src" / "realtime_mapping_scripts"))
-from m360_to_run import write_horizon  # type: ignore  # noqa: E402
+from m360_to_run import write_horizon as write_m360_horizon  # type: ignore  # noqa: E402
+from rplidar_to_run import (  # type: ignore  # noqa: E402
+    POINT_TIME_MODES as RPLIDAR_POINT_TIME_MODES,
+    RAW_MAGIC as RPLIDAR_MAGIC,
+    write_horizon as write_rplidar_horizon,
+)
 
 LOCAL_TZ = ZoneInfo("Europe/Moscow")
 LOG_FORMAT = "%Y_%m_%d_%H_%M_%S_%f"
@@ -141,6 +146,11 @@ def main() -> int:
         default="packet-host",
         help="experimental device-linear uses M360 TimeStamp + x/(HZ*2300)",
     )
+    parser.add_argument(
+        "--rplidar-point-time-mode", choices=RPLIDAR_POINT_TIME_MODES,
+        default="azimuth-device-end",
+        help="reconstruct RPLIDAR beam times from azimuth by default",
+    )
     parser.add_argument("--lidar-start-unix", type=float)
     parser.add_argument("--lidar-end-unix", type=float)
     args = parser.parse_args()
@@ -164,14 +174,27 @@ def main() -> int:
             )
     out = args.output.resolve()
     horizon = out / "horizon"
+    if any(horizon.glob("*.npz")) or (out / "encoder.jsonl").exists():
+        parser.error("canonical output already contains data; choose a new --output directory")
     out.mkdir(parents=True, exist_ok=True)
     if args.lidar_start_unix is not None and args.lidar_end_unix is not None:
         if args.lidar_start_unix >= args.lidar_end_unix:
             parser.error("--lidar-start-unix must be less than --lidar-end-unix")
-    lidar_report = write_horizon(
-        args.scan.resolve(), horizon,
-        point_time_mode=args.m360_point_time_mode,
-        start_unix=args.lidar_start_unix, end_unix=args.lidar_end_unix)
+    scan_path = args.scan.resolve()
+    with scan_path.open("rb") as stream:
+        scan_magic = stream.read(len(RPLIDAR_MAGIC))
+    if scan_magic == RPLIDAR_MAGIC:
+        if args.lidar_start_unix is not None or args.lidar_end_unix is not None:
+            parser.error("LiDAR interval trimming is not implemented for RPLRAW1 captures")
+        print("[convert] Detected RPLRAW1; converting RPLIDAR revolutions...", flush=True)
+        lidar_report = write_rplidar_horizon(
+            scan_path, horizon, point_time_mode=args.rplidar_point_time_mode)
+    else:
+        print("[convert] Detected M360RAW1; converting M360 packets...", flush=True)
+        lidar_report = write_m360_horizon(
+            scan_path, horizon,
+            point_time_mode=args.m360_point_time_mode,
+            start_unix=args.lidar_start_unix, end_unix=args.lidar_end_unix)
     if not lidar_report["first_ts"] or not lidar_report["last_ts"]:
         raise RuntimeError("LiDAR conversion produced no scans")
     if kind == "log":

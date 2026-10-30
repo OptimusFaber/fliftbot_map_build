@@ -92,6 +92,23 @@ DEFINE_string(rplidar_timestamp_convention, "auto",
 
 namespace {
 
+std::ostream* diagnostic_stream = &std::cerr;
+std::ostream& Diagnostic() { return *diagnostic_stream; }
+
+void PrintProgress(const std::string& stage, size_t current, size_t total,
+                   size_t constraints) {
+  const double fraction = total == 0 ? 1.0 : static_cast<double>(current) / total;
+  const int width = 30;
+  const int filled = static_cast<int>(fraction * width);
+  std::cerr << "\r[" << std::string(filled, '#')
+            << std::string(width - filled, '-') << "] "
+            << std::fixed << std::setprecision(1) << fraction * 100.0
+            << "% " << stage << " " << current << "/" << total;
+  std::cerr << " constraints=" << constraints;
+  std::cerr << std::flush;
+  if (current >= total) std::cerr << "\n";
+}
+
 struct NpyArray {
   std::string descr;
   std::vector<size_t> shape;
@@ -564,7 +581,7 @@ RplidarTimingStats SynthesizeRplidarTimes(
     ++stats.synthesized_scans;
     ++synthesized;
   }
-  std::cerr << "synthesized RPLIDAR per-beam times for " << synthesized
+  Diagnostic() << "synthesized RPLIDAR per-beam times for " << synthesized
             << " scans (period=" << period << " s, direction="
             << (direction < 0. ? "clockwise" : "counter-clockwise") << ")\n";
   return stats;
@@ -605,6 +622,12 @@ std::vector<double> IntegrateOdom(const std::vector<Encoder>& encoders,
   // the 160617 recording and made the odometry prior frame-dependent.
   constexpr double static_speed = 0.008;
   for (size_t i = 1; i < encoders.size(); ++i) {
+    // Always carry the last valid pose forward. Leaving this element at the
+    // vector's zero initialization resets the odometry frame whenever a
+    // recorder gap is rejected below.
+    poses[i * 3] = poses[(i - 1) * 3];
+    poses[i * 3 + 1] = poses[(i - 1) * 3 + 1];
+    poses[i * 3 + 2] = poses[(i - 1) * 3 + 2];
     double dt = encoders[i].time - encoders[i - 1].time;
     if (!(dt > 0. && dt <= .5)) continue;
     const double speed = speed_sign * .5 *
@@ -625,6 +648,45 @@ std::vector<double> IntegrateOdom(const std::vector<Encoder>& encoders,
     poses[i * 3 + 2] = yaw + theta;
   }
   return poses;
+}
+
+struct EncoderGapStats {
+  size_t repaired_gaps = 0;
+  size_t inserted_samples = 0;
+  size_t unrepaired_gaps = 0;
+  double maximum_gap_s = 0.;
+};
+
+std::vector<Encoder> RepairEncoderGaps(const std::vector<Encoder>& input,
+                                       EncoderGapStats* stats) {
+  if (input.empty()) return {};
+  constexpr double nominal_max_step_s = 0.1;
+  constexpr double maximum_repairable_gap_s = 1.5;
+  std::vector<Encoder> output;
+  output.reserve(input.size());
+  output.push_back(input.front());
+  for (size_t i = 1; i < input.size(); ++i) {
+    const Encoder& previous = input[i - 1];
+    const Encoder& current = input[i];
+    const double gap = current.time - previous.time;
+    stats->maximum_gap_s = std::max(stats->maximum_gap_s, gap);
+    if (gap > .5 && gap <= maximum_repairable_gap_s) {
+      const size_t segments = static_cast<size_t>(std::ceil(gap / nominal_max_step_s));
+      for (size_t segment = 1; segment < segments; ++segment) {
+        const double fraction = static_cast<double>(segment) / segments;
+        output.push_back({previous.time + fraction * gap,
+                          previous.velocity + fraction * (current.velocity - previous.velocity),
+                          previous.steering_deg + fraction *
+                              (current.steering_deg - previous.steering_deg)});
+        ++stats->inserted_samples;
+      }
+      ++stats->repaired_gaps;
+    } else if (gap > maximum_repairable_gap_s) {
+      ++stats->unrepaired_gaps;
+    }
+    output.push_back(current);
+  }
+  return output;
 }
 
 std::unique_ptr<cartographer::common::LuaParameterDictionary> LoadLua(const fs::path& dir, const std::string& file) {
@@ -706,7 +768,7 @@ void ExportMapAndTrajectory(const fs::path& output, double resolution,
 }  // namespace
 
 int main(int argc, char** argv) {
-  google::InitGoogleLogging(argv[0]); FLAGS_logtostderr = true;
+  google::InitGoogleLogging(argv[0]);
   google::SetUsageMessage("Build a Cartographer map directly from horizon NPZ + encoder.jsonl (no ROS/rosbag).\nExample: " + std::string(argv[0]) + " --run_dir RUN --output OUT --configuration_dir CONFIG");
   google::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_run_dir.empty()) { std::cerr << "--run_dir is required\n"; google::ShowUsageWithFlagsRestrict(argv[0], ""); return 2; }
@@ -718,6 +780,12 @@ int main(int argc, char** argv) {
   try {
     if (!fs::is_directory(horizon)) throw std::runtime_error("missing horizon directory: " + horizon.string());
     fs::create_directories(output);
+    std::ofstream processing_log(output / "processing.log", std::ios::app);
+    if (!processing_log) throw std::runtime_error("cannot open processing.log");
+    diagnostic_stream = &processing_log;
+    FLAGS_logtostderr = false;
+    FLAGS_alsologtostderr = false;
+    FLAGS_log_dir = output.string();
   const Extrinsics ext = LoadExtrinsics(run / "lidar.config");
     std::string tracking_frame = FLAGS_tracking_frame;
     std::transform(tracking_frame.begin(), tracking_frame.end(),
@@ -758,7 +826,7 @@ int main(int argc, char** argv) {
     const OverlapTimingStats overlap_timing =
         NormalizeOverlappingScanTimes(&scans);
     if (overlap_timing.corrected_scans > 0) {
-      std::cerr << "corrected overlapping point times in "
+      Diagnostic() << "corrected overlapping point times in "
                 << overlap_timing.corrected_scans
                 << " scans (max original span="
                 << overlap_timing.maximum_original_span_s << " s)\n";
@@ -775,7 +843,7 @@ int main(int argc, char** argv) {
         sampled.push_back(std::move(scans[i]));
       }
       scans.swap(sampled);
-      std::cerr << "scan stride=" << FLAGS_scan_stride
+      Diagnostic() << "scan stride=" << FLAGS_scan_stride
                 << " selected=" << scans.size() << "\n";
     }
     RplidarTimingStats rplidar_timing;
@@ -785,7 +853,7 @@ int main(int argc, char** argv) {
         collapsed_rplidar_scans += scan.point_times_collapsed;
       }
       if (collapsed_rplidar_scans > 0 && !FLAGS_synthesize_rplidar_times) {
-        std::cerr << "RPLIDAR NPZ has collapsed per-beam timestamps in "
+        Diagnostic() << "RPLIDAR NPZ has collapsed per-beam timestamps in "
                   << collapsed_rplidar_scans
                   << " scans; synthesis is disabled (use "
                      "--synthesize_rplidar_times=true only with a verified "
@@ -806,9 +874,10 @@ int main(int argc, char** argv) {
     // Synthesizing may move each frame timestamp from the first firing to the
     // last firing.  Keep the stream ordered before synchronizing encoders.
     std::sort(scans.begin(), scans.end(), [](const Scan& a, const Scan& b) { return a.stamp < b.stamp; });
-    std::cerr << "loaded scans=" << scans.size() << "\n";
+    Diagnostic() << "STAGE 1/5: input loaded; scans=" << scans.size() << "\n";
     std::vector<Encoder> encoders = LoadEncoders(run / "encoder.jsonl");
-    std::cerr << "loaded encoders=" << encoders.size() << "\n";
+    const size_t original_encoder_count = encoders.size();
+    Diagnostic() << "STAGE 2/5: encoders loaded=" << encoders.size() << "\n";
     if (FLAGS_use_odometry && encoders.size() < 2) throw std::runtime_error("need at least two encoder samples");
     if (FLAGS_use_odometry && encoders.size() >= 2) {
       const double begin = encoders.front().time, end = encoders.back().time;
@@ -826,7 +895,15 @@ int main(int argc, char** argv) {
       for (const auto& e : encoders) if (e.time >= begin && e.time <= end) clipped.push_back(e);
       if (clipped.size() >= 2) encoders.swap(clipped);
     }
-    std::cerr << "clipped encoders=" << encoders.size() << "\n";
+    Diagnostic() << "clipped encoders=" << encoders.size() << "\n";
+    EncoderGapStats encoder_gap_stats;
+    encoders = RepairEncoderGaps(encoders, &encoder_gap_stats);
+    if (encoder_gap_stats.repaired_gaps || encoder_gap_stats.unrepaired_gaps) {
+      Diagnostic() << "encoder gaps: max=" << encoder_gap_stats.maximum_gap_s
+                   << " s repaired=" << encoder_gap_stats.repaired_gaps
+                   << " inserted_samples=" << encoder_gap_stats.inserted_samples
+                   << " unrepaired=" << encoder_gap_stats.unrepaired_gaps << "\n";
+    }
     if (!(FLAGS_wheelbase > 0.) || !std::isfinite(FLAGS_wheelbase) ||
         !std::isfinite(FLAGS_steering_offset_deg) ||
         !std::isfinite(FLAGS_steering_sign) ||
@@ -837,10 +914,10 @@ int main(int argc, char** argv) {
     const auto odom_poses = IntegrateOdom(
         encoders, FLAGS_wheelbase, FLAGS_steering_offset_deg * M_PI / 180.,
         ext.encoder_speed_sign, FLAGS_steering_sign);
-    std::cerr << "integrated odom\n";
+    Diagnostic() << "STAGE 3/5: odometry integrated\n";
     auto top = LoadLua(config_dir, FLAGS_configuration_file);
-    std::cerr << "loaded lua\n";
-    std::cerr << "loaded recording scans=" << scans.size() << " encoders=" << encoders.size() << "\n";
+    Diagnostic() << "STAGE 4/5: Cartographer configuration loaded\n";
+    Diagnostic() << "loaded recording scans=" << scans.size() << " encoders=" << encoders.size() << "\n";
     auto map_options = cartographer::mapping::CreateMapBuilderOptions(top->GetDictionary("map_builder").get());
     auto trajectory_options = cartographer::mapping::CreateTrajectoryBuilderOptions(top->GetDictionary("trajectory_builder").get());
     if (!(FLAGS_max_range > 0.0) || !std::isfinite(FLAGS_max_range)) {
@@ -858,13 +935,13 @@ int main(int argc, char** argv) {
     std::set<SensorId> ids{range}; if (FLAGS_use_odometry) ids.insert(odom);
     const int trajectory_id = map_builder->AddTrajectoryBuilder(ids, trajectory_options, nullptr);
     auto* builder = map_builder->GetTrajectoryBuilder(trajectory_id);
-    std::cerr << "created trajectory\n";
+    Diagnostic() << "STAGE 5/5: feeding Cartographer\n";
     std::vector<Event> events; events.reserve(scans.size() + encoders.size());
     for (size_t i = 0; i < scans.size(); ++i) events.push_back({scans[i].stamp, Event::RANGE, i});
     if (FLAGS_use_odometry) for (size_t i = 0; i < encoders.size(); ++i) events.push_back({encoders[i].time + FLAGS_odometry_time_offset, Event::ODOM, i});
     std::sort(events.begin(), events.end());
     size_t fed_scans = 0, fed_odom = 0;
-    std::cerr << "feeding events=" << events.size() << "\n";
+    Diagnostic() << "feeding events=" << events.size() << "\n";
     for (const auto& event : events) {
       if (event.kind == Event::ODOM) {
         const auto& e = encoders[event.index];
@@ -944,27 +1021,32 @@ int main(int argc, char** argv) {
                 std::move(ranges), {}});
         ++fed_scans;
         if (fed_scans % 100 == 0 || fed_scans == scans.size()) {
-          const double percent = scans.empty() ? 100.0
-                                               : 100.0 * fed_scans / scans.size();
-          std::cerr << "PROGRESS scans=" << fed_scans
-                    << " total=" << scans.size()
-                    << " percent=" << percent << "\n";
+          PrintProgress("feeding scans", fed_scans, scans.size(),
+                        map_builder->pose_graph()->constraints().size());
         }
       }
     }
-    std::cerr << "fed scans=" << fed_scans << " odom=" << fed_odom << ", finishing\n";
+    Diagnostic() << "fed scans=" << fed_scans << " odom=" << fed_odom << ", finishing\n";
     map_builder->FinishTrajectory(trajectory_id);
-    std::cerr << "finished, optimizing\n";
+    Diagnostic() << "finished, optimizing\n";
     map_builder->pose_graph()->RunFinalOptimization();
-    std::cerr << "optimized, serializing\n";
+    Diagnostic() << "STAGE: final optimization complete; constraints="
+              << map_builder->pose_graph()->constraints().size() << "\n";
+    Diagnostic() << "serializing\n";
     if (!map_builder->SerializeStateToFile(true, (output / "map.pbstream").string())) throw std::runtime_error("failed to serialize map.pbstream");
     ExportMapAndTrajectory(output, FLAGS_resolution, tracking_frame,
                            *map_builder);
-    std::cerr << "exported\n";
+    Diagnostic() << "STAGE: map and trajectory exported; constraints="
+              << map_builder->pose_graph()->constraints().size() << "\n";
     std::ofstream stats(output / "run_stats.json"); stats
         << "{\n  \"scans\": " << fed_scans
         << ",\n  \"scan_stride\": " << FLAGS_scan_stride
         << ",\n  \"odom_samples\": " << fed_odom
+        << ",\n  \"original_odom_samples\": " << original_encoder_count
+        << ",\n  \"encoder_maximum_gap_s\": " << encoder_gap_stats.maximum_gap_s
+        << ",\n  \"encoder_repaired_gaps\": " << encoder_gap_stats.repaired_gaps
+        << ",\n  \"encoder_inserted_samples\": " << encoder_gap_stats.inserted_samples
+        << ",\n  \"encoder_unrepaired_gaps\": " << encoder_gap_stats.unrepaired_gaps
         << ",\n  \"constraints\": " << map_builder->pose_graph()->constraints().size()
         << ",\n  \"tracking_frame\": \"" << tracking_frame
         << "\",\n  \"configuration_file\": \"" << FLAGS_configuration_file
@@ -992,7 +1074,8 @@ int main(int argc, char** argv) {
         << ",\n  \"rplidar_period_s\": " << rplidar_timing.period_s
         << ",\n  \"rplidar_direction\": \"" << rplidar_timing.direction << "\""
         << "\n}\n";
-    std::cout << "Standalone Cartographer result: " << output << " (scans=" << fed_scans << ", odom=" << fed_odom << ")\n";
+    std::cout << "Standalone Cartographer result: " << output << " (scans=" << fed_scans << ", odom=" << fed_odom
+              << ", constraints=" << map_builder->pose_graph()->constraints().size() << ")\n";
   } catch (const std::exception& e) { std::cerr << "standalone Cartographer failed: " << e.what() << "\n"; return 1; }
   return 0;
 }

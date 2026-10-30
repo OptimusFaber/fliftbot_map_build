@@ -8,6 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from marker_profiles import (add_marker_options,
+                             resolve_marker_parameters, marker_command_options)
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
@@ -27,20 +30,21 @@ def main() -> int:
     parser.add_argument("--camera-json", type=Path)
     parser.add_argument("--lidar-config", type=Path)
     parser.add_argument("--out-dir", type=Path)
-    parser.add_argument("--ceiling-z", type=float)
-    parser.add_argument("--per-track-height", action="store_true")
-    parser.add_argument("--max-marker-height-m", type=float)
-    parser.add_argument("--merge-radius-m", type=float, default=0.10)
-    parser.add_argument("--min-camera-baseline-m", type=float)
-    parser.add_argument("--max-track-height-uncertainty-m", type=float)
-    parser.add_argument("--height-quality-method", choices=("legacy", "block_cv"))
-    parser.add_argument("--block-distance-m", type=float)
-    parser.add_argument("--max-block-height-instability-m", type=float)
-    parser.add_argument("--stationary-height-filter", action="store_true")
     parser.add_argument("--time-offset-s", type=float,
                         help="seconds added to camera frame timestamps; defaults to camera config/run metadata")
+    parser.add_argument("--group-by-code", action="store_true",
+                        help="diagnostic mode for detector-only observations without persistent track IDs")
+    add_marker_options(parser)
     args = parser.parse_args()
+    try:
+        parameters, profile = resolve_marker_parameters(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     run = args.run_dir.resolve() if args.run_dir else None
+    run_parameters = {}
+    if run and (run / "run_parameters.json").is_file():
+        run_parameters = json.loads((run / "run_parameters.json").read_text(encoding="utf-8"))
+    observations_supplied = args.observations is not None
     defaults = {
         "observations": run / "observations.json" if run else None,
         "trajectory": run / "map/trajectory.json" if run else None,
@@ -56,12 +60,22 @@ def main() -> int:
         if getattr(args, name) is None:
             parser.error(f"--{name.replace('_', '-')} is required without --run-dir")
 
+    if run and not observations_supplied and not args.observations.exists():
+        stored = run_parameters.get("inputs", {}).get("observations")
+        generated = run / "input/video/observations.json"
+        if stored and Path(stored).is_file():
+            args.observations = Path(stored)
+        elif generated.is_file():
+            args.observations = generated
+
     if args.camera_config:
         config_path = args.camera_config.resolve()
         camera = json.loads(config_path.read_text(encoding="utf-8"))
         if args.time_offset_s is None:
             args.time_offset_s = float(camera.get("time_offset_s", 0.0))
         position, angles = camera["position_m"], camera["orientation_deg"]
+        args.camera_position.parent.mkdir(parents=True, exist_ok=True)
+        args.camera_json.parent.mkdir(parents=True, exist_ok=True)
         args.camera_position.write_text(
             f"{position['x']*100:.9g} {position['y']*100:.9g} {position['z']*100:.9g}\n"
             f"{math.radians(angles['roll']):.12g} {math.radians(angles['pitch']):.12g} "
@@ -74,10 +88,8 @@ def main() -> int:
         shutil.copy2(intrinsics, args.camera_json)
 
     if args.time_offset_s is None and run is not None:
-        run_parameters = run / "run_parameters.json"
-        if run_parameters.is_file():
-            camera = json.loads(run_parameters.read_text(encoding="utf-8")).get("camera", {})
-            args.time_offset_s = float(camera.get("time_offset_s", 0.0))
+        args.time_offset_s = float(run_parameters.get("markers", {}).get(
+            "time_offset_s", run_parameters.get("camera", {}).get("time_offset_s", 0.0)))
     if args.time_offset_s is None:
         args.time_offset_s = 0.0
 
@@ -110,37 +122,20 @@ def main() -> int:
         "--observations", str(args.observations), "--trajectory", str(args.trajectory),
         "--map-dir", str(args.map_dir), "--camera-position", str(args.camera_position),
         "--camera-json", str(args.camera_json), "--lidar-config", str(args.lidar_config),
-        "--out-dir", str(args.out_dir), "--merge-radius-m", str(args.merge_radius_m),
+        "--out-dir", str(args.out_dir),
         "--time-offset-s", str(args.time_offset_s),
     ]
-    if args.ceiling_z is not None:
-        command += ["--ceiling-z", str(args.ceiling_z)]
-    if args.per_track_height:
-        command.append("--per-track-height")
-    if args.max_marker_height_m is not None:
-        command += ["--max-marker-height-m", str(args.max_marker_height_m)]
-    for name in ("min_camera_baseline_m", "max_track_height_uncertainty_m",
-                 "height_quality_method", "block_distance_m", "max_block_height_instability_m"):
-        value = getattr(args, name)
-        if value is not None:
-            command += ["--" + name.replace("_", "-"), str(value)]
-    if args.stationary_height_filter:
-        command.append("--stationary-height-filter")
+    command += marker_command_options(parameters)
+    if args.group_by_code:
+        command.append("--group-by-code")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "run_parameters.json").write_text(json.dumps({
         "schema": "fliftbot.marker_run_parameters.v1",
         "inputs": {name: str(getattr(args, name).resolve()) for name in (
             "observations", "trajectory", "map_dir", "camera_position", "camera_json", "lidar_config")},
-        "parameters": {"ceiling_z_m": args.ceiling_z, "per_track_height": args.per_track_height,
-                       "max_marker_height_m": args.max_marker_height_m,
-                       "merge_radius_m": args.merge_radius_m,
-                       "min_camera_baseline_m": args.min_camera_baseline_m,
-                       "max_track_height_uncertainty_m": args.max_track_height_uncertainty_m,
-                       "height_quality_method": args.height_quality_method,
-                       "block_distance_m": args.block_distance_m,
-                       "max_block_height_instability_m": args.max_block_height_instability_m,
-                       "stationary_height_filter": args.stationary_height_filter,
-                       "time_offset_s": args.time_offset_s},
+        "profile": profile,
+        "parameters": {**parameters, "time_offset_s": args.time_offset_s,
+                       "group_by_code": args.group_by_code},
         "command": command,
     }, indent=2) + "\n", encoding="utf-8")
     returncode = subprocess.call(command)
@@ -149,7 +144,8 @@ def main() -> int:
         # reprocessed without rebuilding the map itself.
         from build_from_canonical import export_marker_coordinates, refresh_artifacts
 
-        export_marker_coordinates(run)
+        if (run / "web_map/pbstream_to_local_matrix.npy").is_file():
+            export_marker_coordinates(run)
         rendered = args.out_dir / "stored_ray_corrected_map.png"
         if rendered.is_file():
             shutil.copy2(rendered, run / "map_with_markers.png")

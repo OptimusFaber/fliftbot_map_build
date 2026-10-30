@@ -329,7 +329,11 @@ def main():
     RAY_YAW_CORRECTION_RAD=math.radians(float(correction["yaw"]))
     print(json.dumps({"camera_position_m":CAMERA.tolist(),"camera_angles_rad":camera_meta["source_roll_pitch_rad"],"lidar_position_m":lidar.tolist(),"ray_correction_deg":correction,"time_offset_s":a.time_offset_s},ensure_ascii=False))
     rows,frame_source=rows_from_stored(a.observations,a.camera_json,a.group_by_code)
+    if not rows:
+        p.error("observations contain no usable stored rays")
     tt,traj,traj_meta=base.load_trajectory(a.trajectory)
+    if len(tt)<2:
+        p.error("trajectory must contain at least two LiDAR poses")
     poses,inside=base.interpolate(np.array([r["timestamp_s"] for r in rows])+a.time_offset_s,tt,traj)
     # The Cartographer pose is map->LiDAR.  Rotate the physical camera/LiDAR
     # lever arm by the LiDAR/robot yaw.  Stored rays have a separate frame
